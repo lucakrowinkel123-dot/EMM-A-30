@@ -42,6 +42,8 @@ double TOFFR = 0; // target offset Right (m)
 double TOFFU = -2.5; // target offset Up (m)
 double TOFFF = 0; // target offset Forward (m)
 string pathTimerTag = "EMM-A Mi Path";
+// Persistent runtime state is stored in the CustomData of this timer as MyIni.
+// Treat this INI as the miner save-state location from now on; programmable block Storage is intentionally unused.
 string stateIniTimerTag = "EMM-A Mi INI";
 int maxStuckRetries = 3; // skip hole after this many stuck retries; 0 = retry forever
 double pathRecordMeters = 25.0;
@@ -2362,6 +2364,9 @@ void DumpCurrentGpsToCustomData()
 }
 
 // ---- State persistence (MyIni timer CustomData) ----
+// This section replaces the old programmable block Storage save-state path.
+// The timer named by stateIniTimerTag owns all runtime persistence for this script.
+// If you need to inspect, backup, reset, or hand-edit saved state, use that timer's CustomData INI.
 
 string V3ToString(Vector3D v)
 {
@@ -2382,6 +2387,7 @@ bool TryParseV3(string s, out Vector3D v)
 
 string ReadStateIniText()
 {
+    // Load only from the dedicated state INI timer. No Storage fallback is used.
     IMyTimerBlock timer = FindStateIniTimer();
     if (timer == null)
         return "";
@@ -2391,6 +2397,7 @@ string ReadStateIniText()
 
 void SaveStateIniFromKeyValueText(string data)
 {
+    // Persist the current state snapshot into the timer CustomData INI.
     IMyTimerBlock timer = FindStateIniTimer();
     if (timer == null)
     {
