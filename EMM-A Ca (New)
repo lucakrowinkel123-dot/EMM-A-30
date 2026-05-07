@@ -1069,7 +1069,6 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
     timerName = timer.CustomName;
     string data = timer.CustomData ?? "";
     string[] lines = data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-    bool firstNonEmpty = true;
     foreach (string line in lines)
     {
         string rec = line.Trim();
@@ -1077,9 +1076,8 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
         if (rec.StartsWith("\"") && rec.EndsWith("\"") && rec.Length >= 2)
             rec = rec.Substring(1, rec.Length - 2).Trim();
         if (string.IsNullOrWhiteSpace(rec)) continue;
-        if (firstNonEmpty)
+        if (!pathAnchorValid)
         {
-            firstNonEmpty = false;
             Vector3D ap, af, au;
             if (TryParseCarrierAnchorLine(rec, out ap, out af, out au))
             {
