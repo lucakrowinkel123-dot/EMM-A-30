@@ -42,6 +42,7 @@ double TOFFR = 0; // target offset Right (m)
 double TOFFU = -2.5; // target offset Up (m)
 double TOFFF = 0; // target offset Forward (m)
 string pathTimerTag = "EMM-A Mi Path";
+string stateIniTimerTag = "EMM-A Mi INI";
 int maxStuckRetries = 3; // skip hole after this many stuck retries; 0 = retry forever
 double pathRecordMeters = 25.0;
 double pathRecordMineDepth = 30.0;
@@ -207,6 +208,7 @@ List<MyInventoryItem> _invItems = new List<MyInventoryItem>();
 bool _invCached = false;
 // Cached path timer reference to avoid repeated GTS scans during path recording
 IMyTimerBlock _cachedPathTimer;
+IMyTimerBlock _cachedStateIniTimer;
 int indicatorDelayTicksRemaining = 0;
 int indicatorFlashTicksRemaining = 0;
 enum IndicatorTransitionState { None, WaitEnableAfterColor, WaitNeutralAfterDisable }
@@ -2359,7 +2361,7 @@ void DumpCurrentGpsToCustomData()
     Echo("Dumped GPS/orientation to Custom Data.");
 }
 
-// ---- State persistence (Storage) ----
+// ---- State persistence (MyIni timer CustomData) ----
 
 string V3ToString(Vector3D v)
 {
@@ -2376,6 +2378,54 @@ bool TryParseV3(string s, out Vector3D v)
     if (!double.TryParse(p[0], out x) || !double.TryParse(p[1], out y) || !double.TryParse(p[2], out z)) return false;
     v = new Vector3D(x, y, z);
     return true;
+}
+
+string ReadStateIniText()
+{
+    IMyTimerBlock timer = FindStateIniTimer();
+    if (timer == null)
+        return "";
+
+    return timer.CustomData ?? "";
+}
+
+void SaveStateIniFromKeyValueText(string data)
+{
+    IMyTimerBlock timer = FindStateIniTimer();
+    if (timer == null)
+    {
+        Echo($"State INI timer '{stateIniTimerTag}' not found; state was not saved.");
+        return;
+    }
+
+    MyIni ini = new MyIni();
+    foreach (string line in data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        int eq = line.IndexOf('=');
+        if (eq < 0) continue;
+        ini.Set("state", line.Substring(0, eq).Trim(), line.Substring(eq + 1).Trim());
+    }
+
+    timer.CustomData = ini.ToString();
+}
+
+IMyTimerBlock FindStateIniTimer()
+{
+    if (_cachedStateIniTimer != null &&
+        _cachedStateIniTimer.CustomName.IndexOf(stateIniTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
+        return _cachedStateIniTimer;
+
+    foreach (var t in GetBlocks<IMyTimerBlock>())
+    {
+        if (t.CustomName.IndexOf(stateIniTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            _cachedStateIniTimer = t;
+            return _cachedStateIniTimer;
+        }
+    }
+
+    _cachedStateIniTimer = null;
+    return null;
 }
 
 void SaveState()
@@ -2435,69 +2485,17 @@ void SaveState()
     sb.AppendLine("dockConnectRecompileTicksRemaining=" + dockConnectRecompileTicksRemaining);
     sb.AppendLine("dockConnectRecompileArmed=" + (dockConnectRecompileArmed ? "1" : "0"));
     sb.AppendLine("connectorOffsetLocal=" + V3ToString(connectorOffsetLocal));
-    Storage = sb.ToString();
+    SaveStateIniFromKeyValueText(sb.ToString());
 }
 
 void SaveStateProgressOnly()
 {
-    var dict = ParseStorageKeyValues(Storage);
-
-    dict["autopilotEnabled"] = autopilotEnabled ? "1" : "0";
-    dict["hasTarget"] = hasTarget ? "1" : "0";
-    dict["targetPosition"] = V3ToString(targetPosition);
-    dict["desiredForward"] = V3ToString(desiredForward);
-    dict["desiredUp"] = V3ToString(desiredUp);
-    dict["activeMaxSpeed"] = activeMaxSpeed.ToString("R");
-
-    dict["laneDepth"] = laneDepth.ToString("R");
-    dict["retryLane"] = retryCurrentLane ? "1" : "0";
-    dict["stuckBackout"] = stuckBackout ? "1" : "0";
-    dict["stuckRetryCount"] = stuckRetryCount.ToString();
-
-    dict["pathIndex"] = pathIndex.ToString();
-    dict["pathRecordingWaitReturn"] = pathRecordingWaitReturn ? "1" : "0";
-    dict["pathRecordCounter"] = pathRecordCounter.ToString();
-    dict["pathRecordMineCounter"] = pathRecordMineCounter.ToString();
-    dict["pathRecordMineStage"] = ((int)pathRecordMineStage).ToString();
-    dict["pathRecordMeters"] = pathRecordMeters.ToString("R");
-    dict["pathRecordMineDepth"] = pathRecordMineDepth.ToString("R");
-
-    dict["dockingState"] = ((int)dockingState).ToString();
-    dict["undockRecompileTicksRemaining"] = undockRecompileTicksRemaining.ToString();
-    dict["dockMergeReadyTicks"] = dockMergeReadyTicks.ToString();
-    dict["dockConnectRetryTicks"] = dockConnectRetryTicks.ToString();
-    dict["dockConnectRecompileTicksRemaining"] = dockConnectRecompileTicksRemaining.ToString();
-    dict["dockConnectRecompileArmed"] = dockConnectRecompileArmed ? "1" : "0";
-
-    Storage = BuildStorageFromKeyValues(dict);
-}
-
-Dictionary<string, string> ParseStorageKeyValues(string data)
-{
-    var dict = new Dictionary<string, string>();
-    if (string.IsNullOrWhiteSpace(data))
-        return dict;
-
-    foreach (string line in data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
-    {
-        int eq = line.IndexOf('=');
-        if (eq < 0) continue;
-        dict[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
-    }
-    return dict;
-}
-
-string BuildStorageFromKeyValues(Dictionary<string, string> dict)
-{
-    var sb = new StringBuilder();
-    foreach (var kv in dict)
-        sb.AppendLine(kv.Key + "=" + kv.Value);
-    return sb.ToString();
+    SaveState();
 }
 
 void LoadState()
 {
-    string data = Storage;
+    string data = ReadStateIniText();
     if (string.IsNullOrWhiteSpace(data))
         return;
 
