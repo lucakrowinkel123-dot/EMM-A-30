@@ -1918,11 +1918,10 @@ bool TryParseV3(string s, out Vector3D v)
 string ReadStateIniText()
 {
     IMyTimerBlock timer = FindStateIniTimer();
-    if (timer != null && !string.IsNullOrWhiteSpace(timer.CustomData))
-        return timer.CustomData;
+    if (timer == null)
+        return "";
 
-    // One-time migration path from older script versions that used programmable block Storage.
-    return Storage;
+    return timer.CustomData ?? "";
 }
 
 void SaveStateIniFromKeyValueText(string data)
@@ -1943,7 +1942,6 @@ void SaveStateIniFromKeyValueText(string data)
     }
 
     timer.CustomData = ini.ToString();
-    Storage = "";
 }
 
 IMyTimerBlock FindStateIniTimer()
