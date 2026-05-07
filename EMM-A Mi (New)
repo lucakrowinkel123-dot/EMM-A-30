@@ -1063,14 +1063,17 @@ bool TryGetOrInitPathTimerAnchor(out Vector3D anchorPos, out Vector3D anchorForw
 
     string existing = timer.CustomData ?? "";
     string[] lines = existing.Split(new [] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+    bool hasAny = false;
     foreach (string raw in lines)
     {
         string t = raw.Trim();
         if (string.IsNullOrWhiteSpace(t)) continue;
+        hasAny = true;
         if (TryParseCarrierAnchorLine(t, out anchorPos, out anchorForward, out anchorUp))
             return true;
-        return false; // first non-blank line is not an anchor
     }
+    if (hasAny)
+        return false; // existing content but no anchor line — don't overwrite with a fresh seed
 
     // Empty timer: seed with a fresh anchor from the carrier broadcast.
     if (!HasFreshCarrierPose())
@@ -1839,7 +1842,6 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
     timerName = timer.CustomName;
     string data = timer.CustomData ?? "";
     string[] lines = data.Split(new [] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-    bool firstNonEmpty = true;
     foreach (string line in lines)
     {
         string rec = line.Trim();
@@ -1849,9 +1851,8 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
             rec = rec.Substring(1, rec.Length - 2).Trim();
         if (string.IsNullOrWhiteSpace(rec))
             continue;
-        if (firstNonEmpty)
+        if (!pathAnchorValid)
         {
-            firstNonEmpty = false;
             Vector3D ap, af, au;
             if (TryParseCarrierAnchorLine(rec, out ap, out af, out au))
             {
@@ -1859,7 +1860,7 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
                 pathAnchorForward = af;
                 pathAnchorUp = au;
                 pathAnchorValid = true;
-                continue; // don't include header in records
+                continue; // header is consumed, not run as a record
             }
         }
         records.Add(rec);
