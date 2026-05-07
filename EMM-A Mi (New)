@@ -873,10 +873,11 @@ void HandlePathRecordMineStep()
         }
         SavePathGpsRecord();
         pathRecordMineEntry = rc.GetPosition();
-        // Mine area orientation reuses the carrier dock pose (per design: areas live in the
-        // anchor's plane). Soft-lock and serialization both run off these vectors.
-        pathRecordMineUp = Vector3D.Normalize(carrierConnectorUp);
-        pathRecordMineForward = Vector3D.Normalize(carrierConnectorForward);
+        // Live recording (soft-lock, return-to-entry, auto-mine) uses the miner's own
+        // orientation. The on-disk record projects corners into the anchor's plane at
+        // serialization time, so the stored area still lives in the dock-pose frame.
+        pathRecordMineUp = Vector3D.Normalize(rc.WorldMatrix.Up);
+        pathRecordMineForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
         pathRecordingPaused = true;
         pathRecordMineStage = PathRecordMineStage.EntryCaptured;
         SetMineIndicatorSensor(true);
