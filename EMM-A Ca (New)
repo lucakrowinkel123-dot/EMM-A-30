@@ -26,6 +26,13 @@
 // setallopen   : set all asteroid status lines in Zone DB to "Open" (adds missing lines).
 // LoadAsteroid <n> : load the path records from the saved Asteroid record <n> (e.g. 002)
 //                    into the miner's "EMM-A Mi Path" timer, replacing its current content.
+//
+// Persistent on-disk format (path timer / Asteroid DB / Zone DB):
+//   carrier anchor : cx,cy,cz:ax,ay,az,a     -- absolute pos + axis-angle rotation
+//   path point     : dx,dy,dz:ax,ay,az,a     -- delta from anchor + axis-angle
+//   mine area      : dx,dy,dz:w,h:depth      -- corner-A delta, w/h in anchor plane, depth
+// Player-pasted "GPS:Name:X:Y:Z:|..." waypoints are still accepted by the Nav;... command
+// and as path-timer entries.
 // GoTo <n>         : approach saved Asteroid <n> from a safe side-point, then fly/align to saved
 //                    carrier pose while avoiding the asteroid bubble around the saved site.
 // Mine <n>         : orchestrates GoTo <n> -> LoadAsteroid <n> -> miner PathStart -> wait for miner
@@ -94,6 +101,10 @@ bool pathPaused          = false;
 bool pathPausedNavResume = false;
 List<string> pathRecords = new List<string>();
 int pathIndex            = 0;
+Vector3D pathAnchorPos = Vector3D.Zero;
+Vector3D pathAnchorForward = Vector3D.Zero;
+Vector3D pathAnchorUp = Vector3D.Zero;
+bool pathAnchorValid = false;
 
 double secondsPerTick  = 1.0 / 60.0;
 readonly int echoFrequency = 100;
@@ -482,6 +493,7 @@ void RemoteCommand(string command)
             pathPausedNavResume = false;
             pathRecords.Clear();
             pathIndex           = 0;
+            pathAnchorValid     = false;
             activeMaxSpeed      = 0;
             ResetMovement();
             WriteEcho();
@@ -530,6 +542,7 @@ void RemoteCommand(string command)
             pathPausedNavResume = false;
             pathRecords.Clear();
             pathIndex = 0;
+            pathAnchorValid = false;
             Echo("Path mode stopped.");
             break;
         case "toffreset":
@@ -889,18 +902,17 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
                 t.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
                 break;
 
-            if (!hasGps && t.StartsWith("GPS:", StringComparison.OrdinalIgnoreCase))
-            {
-                if (TryParseGpsCommand(t, out pos, out f, out u))
-                    hasGps = true;
-            }
-            else if (t.StartsWith("Ores:", StringComparison.OrdinalIgnoreCase))
+            if (t.StartsWith("Ores:", StringComparison.OrdinalIgnoreCase))
             {
                 ores = ParseOresLine(t.Substring("Ores:".Length).Trim());
             }
             else if (t.StartsWith("Status:", StringComparison.OrdinalIgnoreCase))
             {
                 status = t.Substring("Status:".Length).Trim();
+            }
+            else if (!hasGps && TryParseCarrierAnchorLine(t, out pos, out f, out u))
+            {
+                hasGps = true;
             }
         }
 
@@ -1024,6 +1036,20 @@ bool ExecutePathRecord(string rawRecord)
         return true;
     }
 
+    if (pathAnchorValid)
+    {
+        Vector3D pos, fwd, upN;
+        if (TryParsePathPointLine(record, pathAnchorPos, out pos, out fwd, out upN))
+        {
+            targetPosition   = pos;
+            desiredForward   = fwd;
+            desiredUp        = upN;
+            hasTarget        = true;
+            autopilotEnabled = true;
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -1031,6 +1057,10 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
 {
     records   = new List<string>();
     timerName = "";
+    pathAnchorValid = false;
+    pathAnchorPos = Vector3D.Zero;
+    pathAnchorForward = Vector3D.Zero;
+    pathAnchorUp = Vector3D.Zero;
 
     IMyTimerBlock timer = FindPathTimer();
     if (timer == null)
@@ -1039,17 +1069,31 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
     timerName = timer.CustomName;
     string data = timer.CustomData ?? "";
     string[] lines = data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+    bool firstNonEmpty = true;
     foreach (string line in lines)
     {
         string rec = line.Trim();
         if (string.IsNullOrWhiteSpace(rec)) continue;
         if (rec.StartsWith("\"") && rec.EndsWith("\"") && rec.Length >= 2)
             rec = rec.Substring(1, rec.Length - 2).Trim();
-        if (!string.IsNullOrWhiteSpace(rec))
-            records.Add(rec);
+        if (string.IsNullOrWhiteSpace(rec)) continue;
+        if (firstNonEmpty)
+        {
+            firstNonEmpty = false;
+            Vector3D ap, af, au;
+            if (TryParseCarrierAnchorLine(rec, out ap, out af, out au))
+            {
+                pathAnchorPos = ap;
+                pathAnchorForward = af;
+                pathAnchorUp = au;
+                pathAnchorValid = true;
+                continue;
+            }
+        }
+        records.Add(rec);
     }
 
-    return records.Count > 0;
+    return records.Count > 0 || pathAnchorValid;
 }
 
 IMyTimerBlock FindPathTimer()
@@ -1331,15 +1375,13 @@ IMyTimerBlock FindZoneDbTimer()
     return _cachedZoneDbTimer;
 }
 
-// Returns a GPS string for the carrier's current RC position and orientation.
+// Returns the compact carrier-anchor line for the carrier's current RC position and orientation.
 string FormatCarrierGps()
 {
     Vector3D p = rc.GetPosition();
     Vector3D f = Vector3D.Normalize(rc.WorldMatrix.Forward);
     Vector3D u = Vector3D.Normalize(rc.WorldMatrix.Up);
-    return "GPS:Carrier:" + p.X.ToString("0.00") + ":" + p.Y.ToString("0.00") + ":" + p.Z.ToString("0.00") +
-           ":|" + u.X.ToString("0.0000") + "," + u.Y.ToString("0.0000") + "," + u.Z.ToString("0.0000") +
-           "," + f.X.ToString("0.0000") + "," + f.Y.ToString("0.0000") + "," + f.Z.ToString("0.0000");
+    return FormatCarrierAnchorLine(p, f, u);
 }
 
 // Formats a non-negative integer with dots as thousands separators (e.g. 9343432 -> "9.343.432").
@@ -1551,6 +1593,7 @@ void HandleGoTo(string argument)
     pathPausedNavResume = false;
     pathRecords.Clear();
     pathIndex = 0;
+    pathAnchorValid = false;
 
     _goToFinalPosition = savedPos;
     _goToFinalForward  = savedForward;
@@ -1603,14 +1646,8 @@ bool TryGetCarrierPoseFromZoneDb(int asteroidNum, out Vector3D pos, out Vector3D
         if (!string.Equals(lines[i].Trim(), label, StringComparison.OrdinalIgnoreCase))
             continue;
 
-        Vector3D gps, f, u;
-        if (TryParseGpsCommand(lines[i + 1].Trim(), out gps, out f, out u))
-        {
-            pos = gps;
-            forward = f;
-            up = u;
+        if (TryParseCarrierAnchorLine(lines[i + 1].Trim(), out pos, out forward, out up))
             return true;
-        }
     }
     return false;
 }
@@ -1770,7 +1807,8 @@ void SetAllAsteroidsOpen()
                 t.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
                 break;
 
-            if (gpsIdx < 0 && t.StartsWith("GPS:", StringComparison.OrdinalIgnoreCase))
+            Vector3D _ap, _af, _au;
+            if (gpsIdx < 0 && TryParseCarrierAnchorLine(t, out _ap, out _af, out _au))
                 gpsIdx = j;
             else if (t.StartsWith("Ores:", StringComparison.OrdinalIgnoreCase))
                 oresIdx = j;
@@ -1871,7 +1909,8 @@ bool TrySetAsteroidStatus(int asteroidNum, string newStatus)
                 break;
 
             insertAt = j + 1;
-            if (gpsIdx < 0 && t.StartsWith("GPS:", StringComparison.OrdinalIgnoreCase))
+            Vector3D _ap, _af, _au;
+            if (gpsIdx < 0 && TryParseCarrierAnchorLine(t, out _ap, out _af, out _au))
                 gpsIdx = j;
             else if (t.StartsWith("Ores:", StringComparison.OrdinalIgnoreCase))
                 oresIdx = j;
@@ -1986,6 +2025,10 @@ void SaveState()
     sb.AppendLine("pathCount="          + pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
         sb.AppendLine("pathRecord" + i + "=" + pathRecords[i]);
+    sb.AppendLine("pathAnchorValid="    + (pathAnchorValid ? "1" : "0"));
+    sb.AppendLine("pathAnchorPos="      + V3ToString(pathAnchorPos));
+    sb.AppendLine("pathAnchorForward="  + V3ToString(pathAnchorForward));
+    sb.AppendLine("pathAnchorUp="       + V3ToString(pathAnchorUp));
     sb.AppendLine("mineSequenceState=" + (int)mineSequenceState);
     sb.AppendLine("mineAsteroidNum=" + mineAsteroidNum);
     sb.AppendLine("mineSavedPos=" + V3ToString(mineSavedPos));
@@ -2042,6 +2085,10 @@ void LoadState()
                 pathRecords.Add(s);
         }
     }
+    if (dict.TryGetValue("pathAnchorValid", out s)) pathAnchorValid = s == "1";
+    if (dict.TryGetValue("pathAnchorPos", out s) && TryParseV3(s, out v)) pathAnchorPos = v;
+    if (dict.TryGetValue("pathAnchorForward", out s) && TryParseV3(s, out v)) pathAnchorForward = v;
+    if (dict.TryGetValue("pathAnchorUp", out s) && TryParseV3(s, out v)) pathAnchorUp = v;
     if (dict.TryGetValue("mineSequenceState", out s) && int.TryParse(s, out n)) mineSequenceState = (MineSequenceState)n;
     if (dict.TryGetValue("mineAsteroidNum", out s) && int.TryParse(s, out n)) mineAsteroidNum = n;
     if (dict.TryGetValue("mineSavedPos", out s) && TryParseV3(s, out v)) mineSavedPos = v;
@@ -2128,6 +2175,92 @@ bool TryParseVector3(string csv, out Vector3D value)
         return false;
     value = new Vector3D(x, y, z);
     return true;
+}
+
+// === Compact path/zone serialization (anchor + axis-angle deltas) ===
+// On-disk record shapes (path timer / Asteroid DB / Zone DB):
+//   anchor (header line 1): cx,cy,cz:ax,ay,az,a   -- absolute carrier pos + axis-angle
+//   path point             : dx,dy,dz:ax,ay,az,a   -- delta from anchor + axis-angle
+//   mine area              : dx,dy,dz:w,h:depth    -- corner A delta, w/h in anchor plane, depth
+
+string FormatPosCsv(Vector3D p)
+{
+    return p.X.ToString("0.00") + "," + p.Y.ToString("0.00") + "," + p.Z.ToString("0.00");
+}
+
+string FormatAxisAngle(Vector3D forward, Vector3D up)
+{
+    if (forward.LengthSquared() < 1e-9 || up.LengthSquared() < 1e-9)
+        return "0.0000,0.0000,0.0000,0.0000";
+    Quaternion q = Quaternion.CreateFromForwardUp((Vector3)Vector3D.Normalize(forward), (Vector3)Vector3D.Normalize(up));
+    double w = MathHelper.Clamp((double)q.W, -1.0, 1.0);
+    double angle = 2.0 * Math.Acos(w);
+    double s = Math.Sqrt(Math.Max(0.0, 1.0 - w * w));
+    if (angle < 1e-6 || s < 1e-9)
+        return "0.0000,0.0000,0.0000,0.0000";
+    double ax = q.X / s, ay = q.Y / s, az = q.Z / s;
+    return ax.ToString("0.0000") + "," + ay.ToString("0.0000") + "," + az.ToString("0.0000") + "," + angle.ToString("0.0000");
+}
+
+bool TryParseAxisAngle(string s, out Vector3D forward, out Vector3D up)
+{
+    forward = new Vector3D(0, 0, -1);
+    up = new Vector3D(0, 1, 0);
+    if (string.IsNullOrWhiteSpace(s)) return false;
+    string[] t = s.Split(',');
+    if (t.Length != 4) return false;
+    double ax, ay, az, angle;
+    if (!double.TryParse(t[0].Trim(), out ax) ||
+        !double.TryParse(t[1].Trim(), out ay) ||
+        !double.TryParse(t[2].Trim(), out az) ||
+        !double.TryParse(t[3].Trim(), out angle))
+        return false;
+    Vector3D axis = new Vector3D(ax, ay, az);
+    if (Math.Abs(angle) < 1e-6 || axis.LengthSquared() < 1e-12)
+        return true;
+    axis = Vector3D.Normalize(axis);
+    Quaternion q = Quaternion.CreateFromAxisAngle((Vector3)axis, (float)angle);
+    forward = Vector3D.Normalize(Vector3D.Transform(new Vector3D(0, 0, -1), q));
+    up = Vector3D.Normalize(Vector3D.Transform(new Vector3D(0, 1, 0), q));
+    return true;
+}
+
+string FormatCarrierAnchorLine(Vector3D pos, Vector3D forward, Vector3D up)
+{
+    return FormatPosCsv(pos) + ":" + FormatAxisAngle(forward, up);
+}
+
+bool TryParseCarrierAnchorLine(string line, out Vector3D pos, out Vector3D forward, out Vector3D up)
+{
+    pos = Vector3D.Zero;
+    forward = new Vector3D(0, 0, -1);
+    up = new Vector3D(0, 1, 0);
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    string[] parts = line.Split(':');
+    if (parts.Length != 2) return false;
+    if (!TryParseVector3(parts[0], out pos)) return false;
+    return TryParseAxisAngle(parts[1], out forward, out up);
+}
+
+bool TryParsePathPointLine(string line, Vector3D anchor, out Vector3D pos, out Vector3D forward, out Vector3D up)
+{
+    pos = Vector3D.Zero;
+    forward = new Vector3D(0, 0, -1);
+    up = new Vector3D(0, 1, 0);
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    string[] parts = line.Split(':');
+    if (parts.Length != 2) return false;
+    Vector3D delta;
+    if (!TryParseVector3(parts[0], out delta)) return false;
+    if (!TryParseAxisAngle(parts[1], out forward, out up)) return false;
+    pos = anchor + delta;
+    return true;
+}
+
+bool LineLooksLikeMineArea(string line)
+{
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    return line.Split(':').Length == 3;
 }
 
 bool HasCarrierTag(IMyTerminalBlock b)

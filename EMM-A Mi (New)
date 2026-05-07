@@ -9,6 +9,13 @@
 // dumpgps : appends current GPS + orientation snapshot to Custom Data
 // minelane;depth : run one mining lane from anchor to depth and return
 // minearea;<gps or x,y,z>;<gps or x,y,z>;Faceup,Faceforward;depth : run distributed lanes over rectangle
+//
+// Path timer storage (CustomData of pathTimerTag) uses a compact anchor-relative format:
+//   line 1 (header): cx,cy,cz:ax,ay,az,a    -- absolute carrier-anchor pos + axis-angle rotation
+//   path point     : dx,dy,dz:ax,ay,az,a    -- delta from anchor + own axis-angle rotation
+//   mine area      : dx,dy,dz:w,h:depth     -- corner-A delta, w/h offsets in anchor's plane, depth
+// The header is seeded from the dock-pose broadcast on the first write; mine areas reuse the
+// anchor's rotation. SE-style "GPS:Name:X:Y:Z:|..." lines remain accepted for player-pasted input.
 // nexthole : back out of current hole if needed, then skip to the next generated area lane anchor
 // nexthole all : back out if needed, then jump directly to the last lane
 // cancelmine : stops mining state machine and turns drills off
@@ -130,6 +137,10 @@ bool pathPaused = false;
 bool pathPausedNavResume = false;
 List<string> pathRecords = new List<string>();
 int pathIndex = 0;
+Vector3D pathAnchorPos = Vector3D.Zero;
+Vector3D pathAnchorForward = Vector3D.Zero;
+Vector3D pathAnchorUp = Vector3D.Zero;
+bool pathAnchorValid = false;
 bool pathRecordingEnabled = false;
 bool pathRecordingPaused = false;
 bool pathRecordingWaitReturn = false;
@@ -560,6 +571,7 @@ void RemoteCommand (string command)
             pathPausedNavResume = false;
             pathRecords.Clear();
             pathIndex = 0;
+            pathAnchorValid = false;
             pathRecordingEnabled = false;
             pathRecordingPaused = false;
             pathRecordingWaitReturn = false;
@@ -654,6 +666,7 @@ void RemoteCommand (string command)
             pathPausedNavResume = false;
             pathRecords.Clear();
             pathIndex = 0;
+            pathAnchorValid = false;
             Echo("Path mode stopped.");
             break;
         case "pathclear":
@@ -784,11 +797,10 @@ bool UpdatePathRecordState()
             // Auto-start area mining for the area just recorded (corners cleared after to prevent re-trigger)
             if ((pathRecordMineCornerB - pathRecordMineCornerA).LengthSquared() > 0.01)
             {
-                string mineCmd = "minearea;" + BuildMineAreaRecord(
+                StartAreaMiningWithCorners(
                     pathRecordMineCornerA, pathRecordMineCornerB,
                     pathRecordMineUp, pathRecordMineForward,
-                    pathRecordMineDepth, pathRecordMineCounter);
-                StartAreaMining(mineCmd);
+                    pathRecordMineDepth);
                 if (miningEnabled)
                 {
                     autoMinedFromPathRecord = true;
@@ -854,10 +866,17 @@ void HandlePathRecordMineStep()
 
     if (pathRecordMineStage == PathRecordMineStage.Idle)
     {
+        if (!HasFreshCarrierPose())
+        {
+            Echo("Mine record denied: no fresh carrier connector pose broadcast.");
+            return;
+        }
         SavePathGpsRecord();
         pathRecordMineEntry = rc.GetPosition();
-        pathRecordMineUp = Vector3D.Normalize(rc.WorldMatrix.Up);
-        pathRecordMineForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
+        // Mine area orientation reuses the carrier dock pose (per design: areas live in the
+        // anchor's plane). Soft-lock and serialization both run off these vectors.
+        pathRecordMineUp = Vector3D.Normalize(carrierConnectorUp);
+        pathRecordMineForward = Vector3D.Normalize(carrierConnectorForward);
         pathRecordingPaused = true;
         pathRecordMineStage = PathRecordMineStage.EntryCaptured;
         SetMineIndicatorSensor(true);
@@ -877,7 +896,13 @@ void HandlePathRecordMineStep()
     Vector3D cornerB = rc.GetPosition();
     pathRecordMineCornerB = cornerB;
     pathRecordMineCounter++;
-    string rec = BuildMineAreaRecord(pathRecordMineCornerA, cornerB, pathRecordMineUp, pathRecordMineForward, pathRecordMineDepth, pathRecordMineCounter);
+    Vector3D anchorPos, anchorForward, anchorUp;
+    if (!TryGetOrInitPathTimerAnchor(out anchorPos, out anchorForward, out anchorUp))
+    {
+        Echo($"Mine area record ready but path timer/anchor missing.");
+        return;
+    }
+    string rec = FormatMineAreaLine(pathRecordMineCornerA, cornerB, anchorPos, anchorForward, anchorUp, pathRecordMineDepth);
     if (!AppendPathRecordLine(rec))
     {
         Echo($"Mine area record ready but timer tag '{pathTimerTag}' not found.");
@@ -896,6 +921,8 @@ void HandlePathRecordMineStep()
     Echo("Mine area saved. Returning to entry point...");
 }
 
+// SE-style GPS string for human copy-paste (used by `dumpgps` only). Persistent records use
+// the compact anchor+delta format instead.
 string FormatCurrentGps(string name)
 {
     Vector3D p = rc.GetPosition();
@@ -908,7 +935,16 @@ void SavePathGpsRecord()
 {
     pathRecordCounter++;
     string idx = pathRecordCounter.ToString("000");
-    string line = FormatCurrentGps(idx);
+    Vector3D anchorPos, anchorForward, anchorUp;
+    if (!TryGetOrInitPathTimerAnchor(out anchorPos, out anchorForward, out anchorUp))
+    {
+        Echo($"Could not save path point {idx}; no path-timer anchor available.");
+        return;
+    }
+    Vector3D p = rc.GetPosition();
+    Vector3D f = Vector3D.Normalize(rc.WorldMatrix.Forward);
+    Vector3D u = Vector3D.Normalize(rc.WorldMatrix.Up);
+    string line = FormatPathPointLine(p, anchorPos, f, u);
     if (AppendPathRecordLine(line))
     {
         TriggerPathPointFlash();
@@ -1012,15 +1048,40 @@ void UpdateIndicatorLight()
     indicatorLight.Color = indicatorNeutralColor;
 }
 
-string BuildMineAreaRecord(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth, int index)
+// Returns the anchor for the path timer. If the timer is empty, a fresh header is written
+// using the current carrier broadcast pose (requires a fresh dock-pose broadcast).
+bool TryGetOrInitPathTimerAnchor(out Vector3D anchorPos, out Vector3D anchorForward, out Vector3D anchorUp)
 {
-    string suffix = index.ToString();
-    string color = "#FF75C9F1";
-    return
-        $"GPS:Corner A{suffix}:{cornerA.X:0.00}:{cornerA.Y:0.00}:{cornerA.Z:0.00}:{color}:;" +
-        $"GPS:Corner B{suffix}:{cornerB.X:0.00}:{cornerB.Y:0.00}:{cornerB.Z:0.00}:{color}:;" +
-        $"{up.X:0.0000},{up.Y:0.0000},{up.Z:0.0000},{forward.X:0.0000},{forward.Y:0.0000},{forward.Z:0.0000};" +
-        $"{depth:0.##}";
+    anchorPos = Vector3D.Zero;
+    anchorForward = Vector3D.Zero;
+    anchorUp = Vector3D.Zero;
+
+    IMyTimerBlock timer = FindPathTimer();
+    if (timer == null)
+        return false;
+
+    string existing = timer.CustomData ?? "";
+    string[] lines = existing.Split(new [] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+    foreach (string raw in lines)
+    {
+        string t = raw.Trim();
+        if (string.IsNullOrWhiteSpace(t)) continue;
+        if (TryParseCarrierAnchorLine(t, out anchorPos, out anchorForward, out anchorUp))
+            return true;
+        return false; // first non-blank line is not an anchor
+    }
+
+    // Empty timer: seed with a fresh anchor from the carrier broadcast.
+    if (!HasFreshCarrierPose())
+    {
+        Echo("Path record: no fresh carrier pose to anchor on.");
+        return false;
+    }
+    anchorPos = GetCarrierConnectorPosition();
+    anchorForward = Vector3D.Normalize(carrierConnectorForward);
+    anchorUp = Vector3D.Normalize(carrierConnectorUp);
+    timer.CustomData = FormatCarrierAnchorLine(anchorPos, anchorForward, anchorUp) + "\n";
+    return true;
 }
 
 bool AppendPathRecordLine(string line)
@@ -1712,15 +1773,7 @@ bool ExecutePathRecord(string rawRecord)
         return dockingState != DockingState.None;
     }
 
-    // A GPS record that contains ";" is a shorthand minearea entry from the path timer.
-    // Path records are expected to drive area mining, so GPS:...<corners>;<orientation>;<depth>
-    // gets forwarded to StartAreaMining as if the user had typed "minearea;" in front of it.
-    if (record.StartsWith("GPS:", StringComparison.OrdinalIgnoreCase) && record.Contains(";"))
-    {
-        StartAreaMining("minearea;" + record);
-        return miningEnabled;
-    }
-
+    // SE-style GPS records remain parseable for player input pasted into the timer.
     string navCmd = null;
     if (record.StartsWith("Nav;", StringComparison.OrdinalIgnoreCase))
         navCmd = record.Substring(4).Trim();
@@ -1740,6 +1793,32 @@ bool ExecutePathRecord(string rawRecord)
         return true;
     }
 
+    // Compact records (mine area / path point) are decoded against the loaded anchor.
+    if (!pathAnchorValid)
+        return false;
+
+    if (LineLooksLikeMineArea(record))
+    {
+        Vector3D cornerA, cornerB, areaUp, areaForward;
+        double depth;
+        if (!TryParseMineAreaLine(record, pathAnchorPos, pathAnchorForward, pathAnchorUp,
+                                  out cornerA, out cornerB, out areaUp, out areaForward, out depth))
+            return false;
+        StartAreaMiningWithCorners(cornerA, cornerB, areaUp, areaForward, depth);
+        return miningEnabled;
+    }
+
+    Vector3D pos, fwd, upN;
+    if (TryParsePathPointLine(record, pathAnchorPos, out pos, out fwd, out upN))
+    {
+        targetPosition = pos;
+        desiredForward = fwd;
+        desiredUp = upN;
+        hasTarget = true;
+        autopilotEnabled = true;
+        return true;
+    }
+
     return false;
 }
 
@@ -1747,6 +1826,10 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
 {
     records = new List<string>();
     timerName = "";
+    pathAnchorValid = false;
+    pathAnchorPos = Vector3D.Zero;
+    pathAnchorForward = Vector3D.Zero;
+    pathAnchorUp = Vector3D.Zero;
 
     IMyTimerBlock timer = FindPathTimer();
     if (timer == null)
@@ -1755,6 +1838,7 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
     timerName = timer.CustomName;
     string data = timer.CustomData ?? "";
     string[] lines = data.Split(new [] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+    bool firstNonEmpty = true;
     foreach (string line in lines)
     {
         string rec = line.Trim();
@@ -1764,10 +1848,23 @@ bool TryLoadPathRecordsFromTimer(out List<string> records, out string timerName)
             rec = rec.Substring(1, rec.Length - 2).Trim();
         if (string.IsNullOrWhiteSpace(rec))
             continue;
+        if (firstNonEmpty)
+        {
+            firstNonEmpty = false;
+            Vector3D ap, af, au;
+            if (TryParseCarrierAnchorLine(rec, out ap, out af, out au))
+            {
+                pathAnchorPos = ap;
+                pathAnchorForward = af;
+                pathAnchorUp = au;
+                pathAnchorValid = true;
+                continue; // don't include header in records
+            }
+        }
         records.Add(rec);
     }
 
-    return records.Count > 0;
+    return records.Count > 0 || pathAnchorValid;
 }
 
 void StartSingleLaneMining(string command)
@@ -1850,12 +1947,17 @@ void StartAreaMining(string command)
         return;
     }
 
+    StartAreaMiningWithCorners(leftUpper, rightBottom, up, forward, depth);
+}
+
+void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth)
+{
     Vector3D right = Vector3D.Cross(forward, up);
     if (right.LengthSquared() < 0.001)
         right = rc.WorldMatrix.Right;
     right = Vector3D.Normalize(right);
 
-    areaLaneAnchors = BuildRectangleLaneAnchors(leftUpper, rightBottom, up, right, MINEH, MINEW);
+    areaLaneAnchors = BuildRectangleLaneAnchors(cornerA, cornerB, up, right, MINEH, MINEW);
     if (areaLaneAnchors.Count == 0)
     {
         Echo("Unable to generate area lanes.");
@@ -1988,6 +2090,139 @@ bool TryParseVector3(string csv, out Vector3D value)
         return false;
     value = new Vector3D(x, y, z);
     return true;
+}
+
+// === Compact path/zone serialization (anchor + axis-angle deltas) ===
+// On-disk record shapes (path timer / Asteroid DB / Zone DB):
+//   anchor (header line 1): cx,cy,cz:ax,ay,az,a   -- absolute carrier pos + axis-angle
+//   path point             : dx,dy,dz:ax,ay,az,a   -- delta from anchor + axis-angle
+//   mine area              : dx,dy,dz:w,h:depth    -- corner A delta, w/h in anchor plane, depth
+// Disambiguation: header by file position; mine area by 3 ':'-segments, path point by 2.
+
+string FormatPosCsv(Vector3D p)
+{
+    return p.X.ToString("0.00") + "," + p.Y.ToString("0.00") + "," + p.Z.ToString("0.00");
+}
+
+string FormatAxisAngle(Vector3D forward, Vector3D up)
+{
+    if (forward.LengthSquared() < 1e-9 || up.LengthSquared() < 1e-9)
+        return "0.0000,0.0000,0.0000,0.0000";
+    Quaternion q = Quaternion.CreateFromForwardUp((Vector3)Vector3D.Normalize(forward), (Vector3)Vector3D.Normalize(up));
+    double w = MathHelper.Clamp((double)q.W, -1.0, 1.0);
+    double angle = 2.0 * Math.Acos(w);
+    double s = Math.Sqrt(Math.Max(0.0, 1.0 - w * w));
+    if (angle < 1e-6 || s < 1e-9)
+        return "0.0000,0.0000,0.0000,0.0000";
+    double ax = q.X / s, ay = q.Y / s, az = q.Z / s;
+    return ax.ToString("0.0000") + "," + ay.ToString("0.0000") + "," + az.ToString("0.0000") + "," + angle.ToString("0.0000");
+}
+
+bool TryParseAxisAngle(string s, out Vector3D forward, out Vector3D up)
+{
+    forward = new Vector3D(0, 0, -1);
+    up = new Vector3D(0, 1, 0);
+    if (string.IsNullOrWhiteSpace(s)) return false;
+    string[] t = s.Split(',');
+    if (t.Length != 4) return false;
+    double ax, ay, az, angle;
+    if (!double.TryParse(t[0].Trim(), out ax) ||
+        !double.TryParse(t[1].Trim(), out ay) ||
+        !double.TryParse(t[2].Trim(), out az) ||
+        !double.TryParse(t[3].Trim(), out angle))
+        return false;
+    Vector3D axis = new Vector3D(ax, ay, az);
+    if (Math.Abs(angle) < 1e-6 || axis.LengthSquared() < 1e-12)
+        return true; // identity orientation
+    axis = Vector3D.Normalize(axis);
+    Quaternion q = Quaternion.CreateFromAxisAngle((Vector3)axis, (float)angle);
+    forward = Vector3D.Normalize(Vector3D.Transform(new Vector3D(0, 0, -1), q));
+    up = Vector3D.Normalize(Vector3D.Transform(new Vector3D(0, 1, 0), q));
+    return true;
+}
+
+string FormatCarrierAnchorLine(Vector3D pos, Vector3D forward, Vector3D up)
+{
+    return FormatPosCsv(pos) + ":" + FormatAxisAngle(forward, up);
+}
+
+bool TryParseCarrierAnchorLine(string line, out Vector3D pos, out Vector3D forward, out Vector3D up)
+{
+    pos = Vector3D.Zero;
+    forward = new Vector3D(0, 0, -1);
+    up = new Vector3D(0, 1, 0);
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    string[] parts = line.Split(':');
+    if (parts.Length != 2) return false;
+    if (!TryParseVector3(parts[0], out pos)) return false;
+    return TryParseAxisAngle(parts[1], out forward, out up);
+}
+
+string FormatPathPointLine(Vector3D pos, Vector3D anchor, Vector3D forward, Vector3D up)
+{
+    return FormatPosCsv(pos - anchor) + ":" + FormatAxisAngle(forward, up);
+}
+
+bool TryParsePathPointLine(string line, Vector3D anchor, out Vector3D pos, out Vector3D forward, out Vector3D up)
+{
+    pos = Vector3D.Zero;
+    forward = new Vector3D(0, 0, -1);
+    up = new Vector3D(0, 1, 0);
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    string[] parts = line.Split(':');
+    if (parts.Length != 2) return false;
+    Vector3D delta;
+    if (!TryParseVector3(parts[0], out delta)) return false;
+    if (!TryParseAxisAngle(parts[1], out forward, out up)) return false;
+    pos = anchor + delta;
+    return true;
+}
+
+string FormatMineAreaLine(Vector3D cornerA, Vector3D cornerB, Vector3D anchor, Vector3D anchorForward, Vector3D anchorUp, double depth)
+{
+    Vector3D right = Vector3D.Cross(anchorForward, anchorUp);
+    if (right.LengthSquared() > 1e-9) right = Vector3D.Normalize(right);
+    Vector3D upN = (anchorUp.LengthSquared() > 1e-9) ? Vector3D.Normalize(anchorUp) : anchorUp;
+    Vector3D delta = cornerB - cornerA;
+    double w = Vector3D.Dot(delta, right);
+    double h = Vector3D.Dot(delta, upN);
+    return FormatPosCsv(cornerA - anchor) + ":" +
+           w.ToString("0.00") + "," + h.ToString("0.00") + ":" +
+           depth.ToString("0.##");
+}
+
+bool TryParseMineAreaLine(string line, Vector3D anchor, Vector3D anchorForward, Vector3D anchorUp,
+                          out Vector3D cornerA, out Vector3D cornerB,
+                          out Vector3D areaUp, out Vector3D areaForward, out double depth)
+{
+    cornerA = Vector3D.Zero;
+    cornerB = Vector3D.Zero;
+    areaUp = anchorUp;
+    areaForward = anchorForward;
+    depth = 0;
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    string[] parts = line.Split(':');
+    if (parts.Length != 3) return false;
+    Vector3D aDelta;
+    if (!TryParseVector3(parts[0], out aDelta)) return false;
+    string[] wh = parts[1].Split(',');
+    if (wh.Length != 2) return false;
+    double w, h;
+    if (!double.TryParse(wh[0].Trim(), out w) || !double.TryParse(wh[1].Trim(), out h)) return false;
+    if (!double.TryParse(parts[2].Trim(), out depth)) return false;
+    cornerA = anchor + aDelta;
+    Vector3D right = Vector3D.Cross(anchorForward, anchorUp);
+    if (right.LengthSquared() > 1e-9) right = Vector3D.Normalize(right);
+    areaUp = (anchorUp.LengthSquared() > 1e-9) ? Vector3D.Normalize(anchorUp) : anchorUp;
+    areaForward = (anchorForward.LengthSquared() > 1e-9) ? Vector3D.Normalize(anchorForward) : anchorForward;
+    cornerB = cornerA + right * w + areaUp * h;
+    return true;
+}
+
+bool LineLooksLikeMineArea(string line)
+{
+    if (string.IsNullOrWhiteSpace(line)) return false;
+    return line.Split(':').Length == 3;
 }
 
 bool TryParsePoint(string text, out Vector3D value)
@@ -2469,6 +2704,10 @@ void SaveState()
     sb.AppendLine("pathCount=" + pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
         sb.AppendLine("pathRecord" + i + "=" + pathRecords[i]);
+    sb.AppendLine("pathAnchorValid=" + (pathAnchorValid ? "1" : "0"));
+    sb.AppendLine("pathAnchorPos=" + V3ToString(pathAnchorPos));
+    sb.AppendLine("pathAnchorForward=" + V3ToString(pathAnchorForward));
+    sb.AppendLine("pathAnchorUp=" + V3ToString(pathAnchorUp));
     sb.AppendLine("pathRecordingEnabled=" + (pathRecordingEnabled ? "1" : "0"));
     sb.AppendLine("pathRecordingPaused=" + (pathRecordingPaused ? "1" : "0"));
     sb.AppendLine("pathRecordingWaitReturn=" + (pathRecordingWaitReturn ? "1" : "0"));
@@ -2567,6 +2806,10 @@ void LoadState()
                 pathRecords.Add(s);
         }
     }
+    if (dict.TryGetValue("pathAnchorValid", out s)) pathAnchorValid = s == "1";
+    if (dict.TryGetValue("pathAnchorPos", out s) && TryParseV3(s, out v)) pathAnchorPos = v;
+    if (dict.TryGetValue("pathAnchorForward", out s) && TryParseV3(s, out v)) pathAnchorForward = v;
+    if (dict.TryGetValue("pathAnchorUp", out s) && TryParseV3(s, out v)) pathAnchorUp = v;
 
     if (dict.TryGetValue("pathRecordingEnabled", out s)) pathRecordingEnabled = s == "1";
     if (dict.TryGetValue("pathRecordingPaused", out s)) pathRecordingPaused = s == "1";
