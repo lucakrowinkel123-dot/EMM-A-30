@@ -17,7 +17,7 @@
 // saveasteroid : simulate recompile, then save carrier pos, miner ore totals, and miner
 //                path into the next Asteroid Record slot across "EMM-A Ca Asteroid DB Axx"
 //                timers (asteroidsPerDb records each). Also updates "EMM-A Ca Zone DB"
-//                with ore list + status (saved as Complete). Sends PathClear to miner.
+//                with ore list + status (saved as Complete). Clears the miner's path timer.
 // Missing ore names are auto-added to timer "EMM-A Ca Ores" custom data
 // in format: <OreName> on
 // <OreName> on/off : set one ore row state in "EMM-A Ca Ores" (example: Iron off)
@@ -1207,7 +1207,11 @@ void SaveAsteroid()
     UpdateZoneDb(asteroidNum, dbTimerName, carrierGps, oreMap);
 
     Echo($"SaveAsteroid: Asteroid {label} saved. Zone DB updated.");
-    SendMinerCommand("PathClear");
+    IMyTimerBlock minerPathTimer = FindMinerPathTimer();
+    if (minerPathTimer != null)
+        minerPathTimer.CustomData = "";
+    else
+        Echo($"SaveAsteroid: miner path timer '{minerPathTimerTag}' not found; cannot clear.");
 }
 
 void EnsureOreNamesListed(Dictionary<string, double> oreMap)
