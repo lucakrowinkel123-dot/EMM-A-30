@@ -116,7 +116,6 @@ double runtimePeakWindowElapsedSeconds = 0;
 IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedZoneDbTimer;
 IMyTimerBlock _cachedStateIniTimer;
-MyIni _stateIni = new MyIni();
 
 bool goToMode = false;
 int goToStage = 0; // 1 = flying to safe side-point, 2 = final approach to saved carrier pose
@@ -2079,6 +2078,37 @@ bool TryParseV3(string s, out Vector3D v)
     return true;
 }
 
+string ReadStateIniText()
+{
+    // Load only from the dedicated state INI timer. No Storage fallback is used.
+    IMyTimerBlock timer = FindStateIniTimer();
+    if (timer == null)
+        return "";
+
+    return timer.CustomData ?? "";
+}
+
+void SaveStateIniFromKeyValueText(string data)
+{
+    // Persist the current state snapshot into the timer CustomData INI.
+    IMyTimerBlock timer = FindStateIniTimer();
+    if (timer == null)
+    {
+        Echo($"State INI timer '{stateIniTimerTag}' not found; state was not saved.");
+        return;
+    }
+
+    MyIni ini = new MyIni();
+    foreach (string line in data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        int eq = line.IndexOf('=');
+        if (eq < 0) continue;
+        ini.Set("state", line.Substring(0, eq).Trim(), line.Substring(eq + 1).Trim());
+    }
+
+    timer.CustomData = ini.ToString();
+}
+
 IMyTimerBlock FindStateIniTimer()
 {
     if (_cachedStateIniTimer != null &&
@@ -2098,92 +2128,36 @@ IMyTimerBlock FindStateIniTimer()
     return null;
 }
 
-const string StateSection = "state";
-
-void BeginStateWrite()
-{
-    _stateIni.Clear();
-}
-
-void WriteStateToTimer()
-{
-    IMyTimerBlock timer = FindStateIniTimer();
-    if (timer == null)
-    {
-        Echo($"State INI timer '{stateIniTimerTag}' not found; state was not saved.");
-        return;
-    }
-
-    timer.CustomData = _stateIni.ToString();
-}
-
-void SetState(string key, string value)
-{
-    _stateIni.Set(StateSection, key, value);
-}
-
-void SetStateBool(string key, bool value)
-{
-    _stateIni.Set(StateSection, key, value ? "1" : "0");
-}
-
-bool LoadStateIni()
-{
-    IMyTimerBlock timer = FindStateIniTimer();
-    if (timer == null || string.IsNullOrWhiteSpace(timer.CustomData))
-        return false;
-
-    _stateIni.Clear();
-    if (!_stateIni.TryParse(timer.CustomData))
-    {
-        Echo($"State INI timer '{stateIniTimerTag}' contains invalid INI; state was not loaded.");
-        return false;
-    }
-
-    return true;
-}
-
-bool TryGetState(string key, out string value)
-{
-    value = _stateIni.Get(StateSection, key).ToString();
-    return !string.IsNullOrEmpty(value);
-}
-
-bool StateBool(string value)
-{
-    return value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase);
-}
-
 void SaveState()
 {
-    BeginStateWrite();
-    SetStateBool("autopilotEnabled", autopilotEnabled);
-    SetStateBool("hasTarget", hasTarget);
-    SetState("targetPosition", V3ToString(targetPosition));
-    SetState("desiredForward", V3ToString(desiredForward));
-    SetState("desiredUp", V3ToString(desiredUp));
-    SetState("activeMaxSpeed", activeMaxSpeed.ToString("R"));
-    SetStateBool("pathMode", pathMode);
-    SetStateBool("pathPaused", pathPaused);
-    SetStateBool("pathPausedNavResume", pathPausedNavResume);
-    SetState("pathIndex", pathIndex.ToString());
-    SetState("pathCount", pathRecords.Count.ToString());
+    var sb = new StringBuilder();
+    sb.AppendLine("autopilotEnabled="   + (autopilotEnabled ? "1" : "0"));
+    sb.AppendLine("hasTarget="          + (hasTarget ? "1" : "0"));
+    sb.AppendLine("targetPosition="     + V3ToString(targetPosition));
+    sb.AppendLine("desiredForward="     + V3ToString(desiredForward));
+    sb.AppendLine("desiredUp="          + V3ToString(desiredUp));
+    sb.AppendLine("activeMaxSpeed="     + activeMaxSpeed.ToString("R"));
+    sb.AppendLine("pathMode="           + (pathMode ? "1" : "0"));
+    sb.AppendLine("pathPaused="         + (pathPaused ? "1" : "0"));
+    sb.AppendLine("pathPausedNavResume=" + (pathPausedNavResume ? "1" : "0"));
+    sb.AppendLine("pathIndex="          + pathIndex);
+    sb.AppendLine("pathCount="          + pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
-        SetState("pathRecord" + i, pathRecords[i]);
-    SetStateBool("pathAnchorValid", pathAnchorValid);
-    SetState("pathAnchorPos", V3ToString(pathAnchorPos));
-    SetState("pathAnchorForward", V3ToString(pathAnchorForward));
-    SetState("pathAnchorUp", V3ToString(pathAnchorUp));
-    SetState("mineSequenceState", ((int)mineSequenceState).ToString());
-    SetState("mineAsteroidNum", mineAsteroidNum.ToString());
-    SetState("mineSavedPos", V3ToString(mineSavedPos));
-    SetState("mineSavedForward", V3ToString(mineSavedForward));
-    SetState("mineSavedUp", V3ToString(mineSavedUp));
-    SetState("mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
-    SetStateBool("minerPathCompleteReceived", minerPathCompleteReceived);
-    SetState("mineStationaryTicks", mineStationaryTicks.ToString());
-    SetStateBool("fullAutoEnabled", fullAutoEnabled);
-    WriteStateToTimer();
+        sb.AppendLine("pathRecord" + i + "=" + pathRecords[i]);
+    sb.AppendLine("pathAnchorValid="    + (pathAnchorValid ? "1" : "0"));
+    sb.AppendLine("pathAnchorPos="      + V3ToString(pathAnchorPos));
+    sb.AppendLine("pathAnchorForward="  + V3ToString(pathAnchorForward));
+    sb.AppendLine("pathAnchorUp="       + V3ToString(pathAnchorUp));
+    sb.AppendLine("mineSequenceState=" + (int)mineSequenceState);
+    sb.AppendLine("mineAsteroidNum=" + mineAsteroidNum);
+    sb.AppendLine("mineSavedPos=" + V3ToString(mineSavedPos));
+    sb.AppendLine("mineSavedForward=" + V3ToString(mineSavedForward));
+    sb.AppendLine("mineSavedUp=" + V3ToString(mineSavedUp));
+    sb.AppendLine("mineFrontApproachPoint=" + V3ToString(mineFrontApproachPoint));
+    sb.AppendLine("minerPathCompleteReceived=" + (minerPathCompleteReceived ? "1" : "0"));
+    sb.AppendLine("mineStationaryTicks=" + mineStationaryTicks);
+    sb.AppendLine("fullAutoEnabled=" + (fullAutoEnabled ? "1" : "0"));
+    SaveStateIniFromKeyValueText(sb.ToString());
 }
 
 void SaveStateProgressOnly()
@@ -2193,47 +2167,56 @@ void SaveStateProgressOnly()
 
 void LoadState()
 {
-    if (!LoadStateIni()) return;
+    string data = ReadStateIniText();
+    if (string.IsNullOrWhiteSpace(data)) return;
+
+    var dict = new Dictionary<string, string>();
+    foreach (string line in data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        int eq = line.IndexOf('=');
+        if (eq < 0) continue;
+        dict[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+    }
 
     string s;
     int n;
     double d;
     Vector3D v;
 
-    if (TryGetState("autopilotEnabled",   out s)) autopilotEnabled   = StateBool(s);
-    if (TryGetState("hasTarget",           out s)) hasTarget           = StateBool(s);
-    if (TryGetState("targetPosition",      out s) && TryParseV3(s, out v)) targetPosition  = v;
-    if (TryGetState("desiredForward",      out s) && TryParseV3(s, out v)) desiredForward  = v;
-    if (TryGetState("desiredUp",           out s) && TryParseV3(s, out v)) desiredUp       = v;
-    if (TryGetState("activeMaxSpeed",      out s) && double.TryParse(s, out d)) activeMaxSpeed = d;
-    if (TryGetState("pathMode",            out s)) pathMode            = StateBool(s);
-    if (TryGetState("pathPaused",          out s)) pathPaused          = StateBool(s);
-    if (TryGetState("pathPausedNavResume", out s)) pathPausedNavResume = StateBool(s);
-    if (TryGetState("pathIndex",           out s) && int.TryParse(s, out n)) pathIndex = n;
+    if (dict.TryGetValue("autopilotEnabled",   out s)) autopilotEnabled   = s == "1";
+    if (dict.TryGetValue("hasTarget",           out s)) hasTarget           = s == "1";
+    if (dict.TryGetValue("targetPosition",      out s) && TryParseV3(s, out v)) targetPosition  = v;
+    if (dict.TryGetValue("desiredForward",      out s) && TryParseV3(s, out v)) desiredForward  = v;
+    if (dict.TryGetValue("desiredUp",           out s) && TryParseV3(s, out v)) desiredUp       = v;
+    if (dict.TryGetValue("activeMaxSpeed",      out s) && double.TryParse(s, out d)) activeMaxSpeed = d;
+    if (dict.TryGetValue("pathMode",            out s)) pathMode            = s == "1";
+    if (dict.TryGetValue("pathPaused",          out s)) pathPaused          = s == "1";
+    if (dict.TryGetValue("pathPausedNavResume", out s)) pathPausedNavResume = s == "1";
+    if (dict.TryGetValue("pathIndex",           out s) && int.TryParse(s, out n)) pathIndex = n;
 
     int pathCount = 0;
-    if (TryGetState("pathCount", out s) && int.TryParse(s, out pathCount) && pathCount > 0)
+    if (dict.TryGetValue("pathCount", out s) && int.TryParse(s, out pathCount) && pathCount > 0)
     {
         pathRecords = new List<string>(pathCount);
         for (int i = 0; i < pathCount; i++)
         {
-            if (TryGetState("pathRecord" + i, out s))
+            if (dict.TryGetValue("pathRecord" + i, out s))
                 pathRecords.Add(s);
         }
     }
-    if (TryGetState("pathAnchorValid", out s)) pathAnchorValid = StateBool(s);
-    if (TryGetState("pathAnchorPos", out s) && TryParseV3(s, out v)) pathAnchorPos = v;
-    if (TryGetState("pathAnchorForward", out s) && TryParseV3(s, out v)) pathAnchorForward = v;
-    if (TryGetState("pathAnchorUp", out s) && TryParseV3(s, out v)) pathAnchorUp = v;
-    if (TryGetState("mineSequenceState", out s) && int.TryParse(s, out n)) mineSequenceState = (MineSequenceState)n;
-    if (TryGetState("mineAsteroidNum", out s) && int.TryParse(s, out n)) mineAsteroidNum = n;
-    if (TryGetState("mineSavedPos", out s) && TryParseV3(s, out v)) mineSavedPos = v;
-    if (TryGetState("mineSavedForward", out s) && TryParseV3(s, out v)) mineSavedForward = v;
-    if (TryGetState("mineSavedUp", out s) && TryParseV3(s, out v)) mineSavedUp = v;
-    if (TryGetState("mineFrontApproachPoint", out s) && TryParseV3(s, out v)) mineFrontApproachPoint = v;
-    if (TryGetState("minerPathCompleteReceived", out s)) minerPathCompleteReceived = StateBool(s);
-    if (TryGetState("mineStationaryTicks", out s) && int.TryParse(s, out n)) mineStationaryTicks = n;
-    if (TryGetState("fullAutoEnabled", out s)) fullAutoEnabled = StateBool(s);
+    if (dict.TryGetValue("pathAnchorValid", out s)) pathAnchorValid = s == "1";
+    if (dict.TryGetValue("pathAnchorPos", out s) && TryParseV3(s, out v)) pathAnchorPos = v;
+    if (dict.TryGetValue("pathAnchorForward", out s) && TryParseV3(s, out v)) pathAnchorForward = v;
+    if (dict.TryGetValue("pathAnchorUp", out s) && TryParseV3(s, out v)) pathAnchorUp = v;
+    if (dict.TryGetValue("mineSequenceState", out s) && int.TryParse(s, out n)) mineSequenceState = (MineSequenceState)n;
+    if (dict.TryGetValue("mineAsteroidNum", out s) && int.TryParse(s, out n)) mineAsteroidNum = n;
+    if (dict.TryGetValue("mineSavedPos", out s) && TryParseV3(s, out v)) mineSavedPos = v;
+    if (dict.TryGetValue("mineSavedForward", out s) && TryParseV3(s, out v)) mineSavedForward = v;
+    if (dict.TryGetValue("mineSavedUp", out s) && TryParseV3(s, out v)) mineSavedUp = v;
+    if (dict.TryGetValue("mineFrontApproachPoint", out s) && TryParseV3(s, out v)) mineFrontApproachPoint = v;
+    if (dict.TryGetValue("minerPathCompleteReceived", out s)) minerPathCompleteReceived = s == "1";
+    if (dict.TryGetValue("mineStationaryTicks", out s) && int.TryParse(s, out n)) mineStationaryTicks = n;
+    if (dict.TryGetValue("fullAutoEnabled", out s)) fullAutoEnabled = s == "1";
     fullAutoWaitingForMine = false;
     fullAutoActiveAsteroid = 0;
     fullAutoCooldownTicks = 0;
