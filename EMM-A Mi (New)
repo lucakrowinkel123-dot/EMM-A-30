@@ -222,7 +222,6 @@ bool _invCached = false;
 // Cached path timer reference to avoid repeated GTS scans during path recording
 IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedStateIniTimer;
-MyIni _stateIni = new MyIni();
 int indicatorDelayTicksRemaining = 0;
 int indicatorFlashTicksRemaining = 0;
 enum IndicatorTransitionState { None, WaitEnableAfterColor, WaitNeutralAfterDisable }
@@ -2620,6 +2619,37 @@ bool TryParseV3(string s, out Vector3D v)
     return true;
 }
 
+string ReadStateIniText()
+{
+    // Load only from the dedicated state INI timer. No Storage fallback is used.
+    IMyTimerBlock timer = FindStateIniTimer();
+    if (timer == null)
+        return "";
+
+    return timer.CustomData ?? "";
+}
+
+void SaveStateIniFromKeyValueText(string data)
+{
+    // Persist the current state snapshot into the timer CustomData INI.
+    IMyTimerBlock timer = FindStateIniTimer();
+    if (timer == null)
+    {
+        Echo($"State INI timer '{stateIniTimerTag}' not found; state was not saved.");
+        return;
+    }
+
+    MyIni ini = new MyIni();
+    foreach (string line in data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        int eq = line.IndexOf('=');
+        if (eq < 0) continue;
+        ini.Set("state", line.Substring(0, eq).Trim(), line.Substring(eq + 1).Trim());
+    }
+
+    timer.CustomData = ini.ToString();
+}
+
 IMyTimerBlock FindStateIniTimer()
 {
     if (_cachedStateIniTimer != null &&
@@ -2639,124 +2669,68 @@ IMyTimerBlock FindStateIniTimer()
     return null;
 }
 
-const string StateSection = "state";
-
-void BeginStateWrite()
-{
-    _stateIni.Clear();
-}
-
-void WriteStateToTimer()
-{
-    IMyTimerBlock timer = FindStateIniTimer();
-    if (timer == null)
-    {
-        Echo($"State INI timer '{stateIniTimerTag}' not found; state was not saved.");
-        return;
-    }
-
-    timer.CustomData = _stateIni.ToString();
-}
-
-void SetState(string key, string value)
-{
-    _stateIni.Set(StateSection, key, value);
-}
-
-void SetStateBool(string key, bool value)
-{
-    _stateIni.Set(StateSection, key, value ? "1" : "0");
-}
-
-bool LoadStateIni()
-{
-    IMyTimerBlock timer = FindStateIniTimer();
-    if (timer == null || string.IsNullOrWhiteSpace(timer.CustomData))
-        return false;
-
-    _stateIni.Clear();
-    if (!_stateIni.TryParse(timer.CustomData))
-    {
-        Echo($"State INI timer '{stateIniTimerTag}' contains invalid INI; state was not loaded.");
-        return false;
-    }
-
-    return true;
-}
-
-bool TryGetState(string key, out string value)
-{
-    value = _stateIni.Get(StateSection, key).ToString();
-    return !string.IsNullOrEmpty(value);
-}
-
-bool StateBool(string value)
-{
-    return value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase);
-}
-
 void SaveState()
 {
-    BeginStateWrite();
-    SetStateBool("autopilotEnabled", autopilotEnabled);
-    SetStateBool("hasTarget", hasTarget);
-    SetState("targetPosition", V3ToString(targetPosition));
-    SetState("desiredForward", V3ToString(desiredForward));
-    SetState("desiredUp", V3ToString(desiredUp));
-    SetStateBool("miningEnabled", miningEnabled);
-    SetState("miningState", ((int)miningState).ToString());
-    SetState("laneAnchor", V3ToString(laneAnchor));
-    SetState("drillAxis", V3ToString(drillAxis));
-    SetState("laneDepth", laneDepth.ToString("R"));
-    SetState("activeMaxSpeed", activeMaxSpeed.ToString("R"));
-    SetState("depthMode", ((int)depthMode).ToString());
-    SetStateBool("areaMiningMode", areaMiningMode);
-    SetState("areaLaneIndex", areaLaneIndex.ToString());
-    SetStateBool("returnToMinePoseAfterArea", returnToMinePoseAfterArea);
-    SetState("areaMineEntryPos", V3ToString(areaMineEntryPos));
-    SetState("areaMineEntryForward", V3ToString(areaMineEntryForward));
-    SetState("areaMineEntryUp", V3ToString(areaMineEntryUp));
-    SetStateBool("retryLane", retryCurrentLane);
-    SetStateBool("stuckBackout", stuckBackout);
-    SetState("stuckRetryCount", stuckRetryCount.ToString());
-    SetState("areaLaneCount", areaLaneAnchors.Count.ToString());
+    var sb = new StringBuilder();
+    sb.AppendLine("autopilotEnabled=" + (autopilotEnabled ? "1" : "0"));
+    sb.AppendLine("hasTarget=" + (hasTarget ? "1" : "0"));
+    sb.AppendLine("targetPosition=" + V3ToString(targetPosition));
+    sb.AppendLine("desiredForward=" + V3ToString(desiredForward));
+    sb.AppendLine("desiredUp=" + V3ToString(desiredUp));
+    sb.AppendLine("miningEnabled=" + (miningEnabled ? "1" : "0"));
+    sb.AppendLine("miningState=" + (int)miningState);
+    sb.AppendLine("laneAnchor=" + V3ToString(laneAnchor));
+    sb.AppendLine("drillAxis=" + V3ToString(drillAxis));
+    sb.AppendLine("laneDepth=" + laneDepth.ToString("R"));
+    sb.AppendLine("activeMaxSpeed=" + activeMaxSpeed.ToString("R"));
+    sb.AppendLine("depthMode=" + (int)depthMode);
+    sb.AppendLine("areaMiningMode=" + (areaMiningMode ? "1" : "0"));
+    sb.AppendLine("areaLaneIndex=" + areaLaneIndex);
+    sb.AppendLine("returnToMinePoseAfterArea=" + (returnToMinePoseAfterArea ? "1" : "0"));
+    sb.AppendLine("areaMineEntryPos=" + V3ToString(areaMineEntryPos));
+    sb.AppendLine("areaMineEntryForward=" + V3ToString(areaMineEntryForward));
+    sb.AppendLine("areaMineEntryUp=" + V3ToString(areaMineEntryUp));
+    sb.AppendLine("retryLane=" + (retryCurrentLane ? "1" : "0"));
+    sb.AppendLine("stuckBackout=" + (stuckBackout ? "1" : "0"));
+    sb.AppendLine("stuckRetryCount=" + stuckRetryCount);
+    sb.AppendLine("areaLaneCount=" + areaLaneAnchors.Count);
     for (int i = 0; i < areaLaneAnchors.Count; i++)
-        SetState("areaLane" + i, V3ToString(areaLaneAnchors[i]));
-    SetStateBool("pathMode", pathMode);
-    SetStateBool("pathPaused", pathPaused);
-    SetStateBool("pathPausedNavResume", pathPausedNavResume);
-    SetState("pathIndex", pathIndex.ToString());
-    SetState("pathCount", pathRecords.Count.ToString());
+        sb.AppendLine("areaLane" + i + "=" + V3ToString(areaLaneAnchors[i]));
+    sb.AppendLine("pathMode=" + (pathMode ? "1" : "0"));
+    sb.AppendLine("pathPaused=" + (pathPaused ? "1" : "0"));
+    sb.AppendLine("pathPausedNavResume=" + (pathPausedNavResume ? "1" : "0"));
+    sb.AppendLine("pathIndex=" + pathIndex);
+    sb.AppendLine("pathCount=" + pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
-        SetState("pathRecord" + i, pathRecords[i]);
-    SetStateBool("pathAnchorValid", pathAnchorValid);
-    SetState("pathAnchorPos", V3ToString(pathAnchorPos));
-    SetState("pathAnchorForward", V3ToString(pathAnchorForward));
-    SetState("pathAnchorUp", V3ToString(pathAnchorUp));
-    SetStateBool("pathRecordingEnabled", pathRecordingEnabled);
-    SetStateBool("pathRecordingPaused", pathRecordingPaused);
-    SetStateBool("pathRecordingWaitReturn", pathRecordingWaitReturn);
-    SetState("pathRecordLastPos", V3ToString(pathRecordLastPos));
-    SetState("pathRecordCounter", pathRecordCounter.ToString());
-    SetState("pathRecordMineCounter", pathRecordMineCounter.ToString());
-    SetState("pathRecordMineEntry", V3ToString(pathRecordMineEntry));
-    SetState("pathRecordMineCornerA", V3ToString(pathRecordMineCornerA));
-    SetState("pathRecordMineCornerB", V3ToString(pathRecordMineCornerB));
-    SetState("pathRecordMineUp", V3ToString(pathRecordMineUp));
-    SetState("pathRecordMineForward", V3ToString(pathRecordMineForward));
-    SetState("pathRecordMineStage", ((int)pathRecordMineStage).ToString());
-    SetState("pathRecordMeters", pathRecordMeters.ToString("R"));
-    SetState("pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
-    SetStateBool("cockpitGyroForcedOff", cockpitGyroControlForcedOff);
-    SetState("dockingState", ((int)dockingState).ToString());
-    SetStateBool("dockSyncMode", dockSyncMode);
-    SetState("undockRecompileTicksRemaining", undockRecompileTicksRemaining.ToString());
-    SetState("dockMergeReadyTicks", dockMergeReadyTicks.ToString());
-    SetState("dockConnectRetryTicks", dockConnectRetryTicks.ToString());
-    SetState("dockConnectRecompileTicksRemaining", dockConnectRecompileTicksRemaining.ToString());
-    SetStateBool("dockConnectRecompileArmed", dockConnectRecompileArmed);
-    SetState("connectorOffsetLocal", V3ToString(connectorOffsetLocal));
-    WriteStateToTimer();
+        sb.AppendLine("pathRecord" + i + "=" + pathRecords[i]);
+    sb.AppendLine("pathAnchorValid=" + (pathAnchorValid ? "1" : "0"));
+    sb.AppendLine("pathAnchorPos=" + V3ToString(pathAnchorPos));
+    sb.AppendLine("pathAnchorForward=" + V3ToString(pathAnchorForward));
+    sb.AppendLine("pathAnchorUp=" + V3ToString(pathAnchorUp));
+    sb.AppendLine("pathRecordingEnabled=" + (pathRecordingEnabled ? "1" : "0"));
+    sb.AppendLine("pathRecordingPaused=" + (pathRecordingPaused ? "1" : "0"));
+    sb.AppendLine("pathRecordingWaitReturn=" + (pathRecordingWaitReturn ? "1" : "0"));
+    sb.AppendLine("pathRecordLastPos=" + V3ToString(pathRecordLastPos));
+    sb.AppendLine("pathRecordCounter=" + pathRecordCounter);
+    sb.AppendLine("pathRecordMineCounter=" + pathRecordMineCounter);
+    sb.AppendLine("pathRecordMineEntry=" + V3ToString(pathRecordMineEntry));
+    sb.AppendLine("pathRecordMineCornerA=" + V3ToString(pathRecordMineCornerA));
+    sb.AppendLine("pathRecordMineCornerB=" + V3ToString(pathRecordMineCornerB));
+    sb.AppendLine("pathRecordMineUp=" + V3ToString(pathRecordMineUp));
+    sb.AppendLine("pathRecordMineForward=" + V3ToString(pathRecordMineForward));
+    sb.AppendLine("pathRecordMineStage=" + (int)pathRecordMineStage);
+    sb.AppendLine("pathRecordMeters=" + pathRecordMeters.ToString("R"));
+    sb.AppendLine("pathRecordMineDepth=" + pathRecordMineDepth.ToString("R"));
+    sb.AppendLine("cockpitGyroForcedOff=" + (cockpitGyroControlForcedOff ? "1" : "0"));
+    sb.AppendLine("dockingState=" + (int)dockingState);
+    sb.AppendLine("dockSyncMode=" + (dockSyncMode ? "1" : "0"));
+    sb.AppendLine("undockRecompileTicksRemaining=" + undockRecompileTicksRemaining);
+    sb.AppendLine("dockMergeReadyTicks=" + dockMergeReadyTicks);
+    sb.AppendLine("dockConnectRetryTicks=" + dockConnectRetryTicks);
+    sb.AppendLine("dockConnectRecompileTicksRemaining=" + dockConnectRecompileTicksRemaining);
+    sb.AppendLine("dockConnectRecompileArmed=" + (dockConnectRecompileArmed ? "1" : "0"));
+    sb.AppendLine("connectorOffsetLocal=" + V3ToString(connectorOffsetLocal));
+    SaveStateIniFromKeyValueText(sb.ToString());
 }
 
 void SaveStateProgressOnly()
@@ -2766,90 +2740,99 @@ void SaveStateProgressOnly()
 
 void LoadState()
 {
-    if (!LoadStateIni())
+    string data = ReadStateIniText();
+    if (string.IsNullOrWhiteSpace(data))
         return;
+
+    var dict = new Dictionary<string, string>();
+    foreach (string line in data.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        int eq = line.IndexOf('=');
+        if (eq < 0) continue;
+        dict[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+    }
 
     string s;
     int n;
     double d;
     Vector3D v;
 
-    if (TryGetState("autopilotEnabled", out s)) autopilotEnabled = StateBool(s);
-    if (TryGetState("hasTarget", out s)) hasTarget = StateBool(s);
-    if (TryGetState("targetPosition", out s) && TryParseV3(s, out v)) targetPosition = v;
-    if (TryGetState("desiredForward", out s) && TryParseV3(s, out v)) desiredForward = v;
-    if (TryGetState("desiredUp", out s) && TryParseV3(s, out v)) desiredUp = v;
-    if (TryGetState("miningEnabled", out s)) miningEnabled = StateBool(s);
-    if (TryGetState("miningState", out s) && int.TryParse(s, out n)) miningState = (MiningState)n;
-    if (TryGetState("laneAnchor", out s) && TryParseV3(s, out v)) laneAnchor = v;
-    if (TryGetState("drillAxis", out s) && TryParseV3(s, out v)) drillAxis = v;
-    if (TryGetState("laneDepth", out s) && double.TryParse(s, out d)) laneDepth = d;
-    if (TryGetState("activeMaxSpeed", out s) && double.TryParse(s, out d)) activeMaxSpeed = d;
-    if (TryGetState("depthMode", out s) && int.TryParse(s, out n)) depthMode = (DepthMode)n;
-    if (TryGetState("areaMiningMode", out s)) areaMiningMode = StateBool(s);
-    if (TryGetState("areaLaneIndex", out s) && int.TryParse(s, out n)) areaLaneIndex = n;
-    if (TryGetState("returnToMinePoseAfterArea", out s)) returnToMinePoseAfterArea = StateBool(s);
-    if (TryGetState("areaMineEntryPos", out s) && TryParseV3(s, out v)) areaMineEntryPos = v;
-    if (TryGetState("areaMineEntryForward", out s) && TryParseV3(s, out v)) areaMineEntryForward = v;
-    if (TryGetState("areaMineEntryUp", out s) && TryParseV3(s, out v)) areaMineEntryUp = v;
-    if (TryGetState("retryLane", out s)) retryCurrentLane = StateBool(s);
-    if (TryGetState("stuckBackout", out s)) stuckBackout = StateBool(s);
-    if (TryGetState("stuckRetryCount", out s) && int.TryParse(s, out n)) stuckRetryCount = n;
+    if (dict.TryGetValue("autopilotEnabled", out s)) autopilotEnabled = s == "1";
+    if (dict.TryGetValue("hasTarget", out s)) hasTarget = s == "1";
+    if (dict.TryGetValue("targetPosition", out s) && TryParseV3(s, out v)) targetPosition = v;
+    if (dict.TryGetValue("desiredForward", out s) && TryParseV3(s, out v)) desiredForward = v;
+    if (dict.TryGetValue("desiredUp", out s) && TryParseV3(s, out v)) desiredUp = v;
+    if (dict.TryGetValue("miningEnabled", out s)) miningEnabled = s == "1";
+    if (dict.TryGetValue("miningState", out s) && int.TryParse(s, out n)) miningState = (MiningState)n;
+    if (dict.TryGetValue("laneAnchor", out s) && TryParseV3(s, out v)) laneAnchor = v;
+    if (dict.TryGetValue("drillAxis", out s) && TryParseV3(s, out v)) drillAxis = v;
+    if (dict.TryGetValue("laneDepth", out s) && double.TryParse(s, out d)) laneDepth = d;
+    if (dict.TryGetValue("activeMaxSpeed", out s) && double.TryParse(s, out d)) activeMaxSpeed = d;
+    if (dict.TryGetValue("depthMode", out s) && int.TryParse(s, out n)) depthMode = (DepthMode)n;
+    if (dict.TryGetValue("areaMiningMode", out s)) areaMiningMode = s == "1";
+    if (dict.TryGetValue("areaLaneIndex", out s) && int.TryParse(s, out n)) areaLaneIndex = n;
+    if (dict.TryGetValue("returnToMinePoseAfterArea", out s)) returnToMinePoseAfterArea = s == "1";
+    if (dict.TryGetValue("areaMineEntryPos", out s) && TryParseV3(s, out v)) areaMineEntryPos = v;
+    if (dict.TryGetValue("areaMineEntryForward", out s) && TryParseV3(s, out v)) areaMineEntryForward = v;
+    if (dict.TryGetValue("areaMineEntryUp", out s) && TryParseV3(s, out v)) areaMineEntryUp = v;
+    if (dict.TryGetValue("retryLane", out s)) retryCurrentLane = s == "1";
+    if (dict.TryGetValue("stuckBackout", out s)) stuckBackout = s == "1";
+    if (dict.TryGetValue("stuckRetryCount", out s) && int.TryParse(s, out n)) stuckRetryCount = n;
 
     int laneCount = 0;
-    if (TryGetState("areaLaneCount", out s) && int.TryParse(s, out laneCount) && laneCount > 0)
+    if (dict.TryGetValue("areaLaneCount", out s) && int.TryParse(s, out laneCount) && laneCount > 0)
     {
         areaLaneAnchors = new List<Vector3D>(laneCount);
         for (int i = 0; i < laneCount; i++)
         {
-            if (TryGetState("areaLane" + i, out s) && TryParseV3(s, out v))
+            if (dict.TryGetValue("areaLane" + i, out s) && TryParseV3(s, out v))
                 areaLaneAnchors.Add(v);
         }
     }
 
-    if (TryGetState("pathMode", out s)) pathMode = StateBool(s);
-    if (TryGetState("pathPaused", out s)) pathPaused = StateBool(s);
-    if (TryGetState("pathPausedNavResume", out s)) pathPausedNavResume = StateBool(s);
-    if (TryGetState("pathIndex", out s) && int.TryParse(s, out n)) pathIndex = n;
+    if (dict.TryGetValue("pathMode", out s)) pathMode = s == "1";
+    if (dict.TryGetValue("pathPaused", out s)) pathPaused = s == "1";
+    if (dict.TryGetValue("pathPausedNavResume", out s)) pathPausedNavResume = s == "1";
+    if (dict.TryGetValue("pathIndex", out s) && int.TryParse(s, out n)) pathIndex = n;
 
     int pathCount = 0;
-    if (TryGetState("pathCount", out s) && int.TryParse(s, out pathCount) && pathCount > 0)
+    if (dict.TryGetValue("pathCount", out s) && int.TryParse(s, out pathCount) && pathCount > 0)
     {
         pathRecords = new List<string>(pathCount);
         for (int i = 0; i < pathCount; i++)
         {
-            if (TryGetState("pathRecord" + i, out s))
+            if (dict.TryGetValue("pathRecord" + i, out s))
                 pathRecords.Add(s);
         }
     }
-    if (TryGetState("pathAnchorValid", out s)) pathAnchorValid = StateBool(s);
-    if (TryGetState("pathAnchorPos", out s) && TryParseV3(s, out v)) pathAnchorPos = v;
-    if (TryGetState("pathAnchorForward", out s) && TryParseV3(s, out v)) pathAnchorForward = v;
-    if (TryGetState("pathAnchorUp", out s) && TryParseV3(s, out v)) pathAnchorUp = v;
+    if (dict.TryGetValue("pathAnchorValid", out s)) pathAnchorValid = s == "1";
+    if (dict.TryGetValue("pathAnchorPos", out s) && TryParseV3(s, out v)) pathAnchorPos = v;
+    if (dict.TryGetValue("pathAnchorForward", out s) && TryParseV3(s, out v)) pathAnchorForward = v;
+    if (dict.TryGetValue("pathAnchorUp", out s) && TryParseV3(s, out v)) pathAnchorUp = v;
 
-    if (TryGetState("pathRecordingEnabled", out s)) pathRecordingEnabled = StateBool(s);
-    if (TryGetState("pathRecordingPaused", out s)) pathRecordingPaused = StateBool(s);
-    if (TryGetState("pathRecordingWaitReturn", out s)) pathRecordingWaitReturn = StateBool(s);
-    if (TryGetState("pathRecordLastPos", out s) && TryParseV3(s, out v)) pathRecordLastPos = v;
-    if (TryGetState("pathRecordCounter", out s) && int.TryParse(s, out n)) pathRecordCounter = n;
-    if (TryGetState("pathRecordMineCounter", out s) && int.TryParse(s, out n)) pathRecordMineCounter = n;
-    if (TryGetState("pathRecordMineEntry", out s) && TryParseV3(s, out v)) pathRecordMineEntry = v;
-    if (TryGetState("pathRecordMineCornerA", out s) && TryParseV3(s, out v)) pathRecordMineCornerA = v;
-    if (TryGetState("pathRecordMineCornerB", out s) && TryParseV3(s, out v)) pathRecordMineCornerB = v;
-    if (TryGetState("pathRecordMineUp", out s) && TryParseV3(s, out v)) pathRecordMineUp = v;
-    if (TryGetState("pathRecordMineForward", out s) && TryParseV3(s, out v)) pathRecordMineForward = v;
-    if (TryGetState("pathRecordMineStage", out s) && int.TryParse(s, out n)) pathRecordMineStage = (PathRecordMineStage)n;
-    if (TryGetState("pathRecordMeters", out s) && double.TryParse(s, out d)) pathRecordMeters = d;
-    if (TryGetState("pathRecordMineDepth", out s) && double.TryParse(s, out d)) pathRecordMineDepth = d;
-    if (TryGetState("cockpitGyroForcedOff", out s)) cockpitGyroControlForcedOff = StateBool(s);
-    if (TryGetState("dockingState", out s) && int.TryParse(s, out n)) dockingState = (DockingState)n;
-    if (TryGetState("dockSyncMode", out s)) dockSyncMode = StateBool(s);
-    if (TryGetState("undockRecompileTicksRemaining", out s) && int.TryParse(s, out n)) undockRecompileTicksRemaining = n;
-    if (TryGetState("dockMergeReadyTicks", out s) && int.TryParse(s, out n)) dockMergeReadyTicks = n;
-    if (TryGetState("dockConnectRetryTicks", out s) && int.TryParse(s, out n)) dockConnectRetryTicks = n;
-    if (TryGetState("dockConnectRecompileTicksRemaining", out s) && int.TryParse(s, out n)) dockConnectRecompileTicksRemaining = n;
-    if (TryGetState("dockConnectRecompileArmed", out s)) dockConnectRecompileArmed = StateBool(s);
-    if (TryGetState("connectorOffsetLocal", out s) && TryParseV3(s, out v)) connectorOffsetLocal = v;
+    if (dict.TryGetValue("pathRecordingEnabled", out s)) pathRecordingEnabled = s == "1";
+    if (dict.TryGetValue("pathRecordingPaused", out s)) pathRecordingPaused = s == "1";
+    if (dict.TryGetValue("pathRecordingWaitReturn", out s)) pathRecordingWaitReturn = s == "1";
+    if (dict.TryGetValue("pathRecordLastPos", out s) && TryParseV3(s, out v)) pathRecordLastPos = v;
+    if (dict.TryGetValue("pathRecordCounter", out s) && int.TryParse(s, out n)) pathRecordCounter = n;
+    if (dict.TryGetValue("pathRecordMineCounter", out s) && int.TryParse(s, out n)) pathRecordMineCounter = n;
+    if (dict.TryGetValue("pathRecordMineEntry", out s) && TryParseV3(s, out v)) pathRecordMineEntry = v;
+    if (dict.TryGetValue("pathRecordMineCornerA", out s) && TryParseV3(s, out v)) pathRecordMineCornerA = v;
+    if (dict.TryGetValue("pathRecordMineCornerB", out s) && TryParseV3(s, out v)) pathRecordMineCornerB = v;
+    if (dict.TryGetValue("pathRecordMineUp", out s) && TryParseV3(s, out v)) pathRecordMineUp = v;
+    if (dict.TryGetValue("pathRecordMineForward", out s) && TryParseV3(s, out v)) pathRecordMineForward = v;
+    if (dict.TryGetValue("pathRecordMineStage", out s) && int.TryParse(s, out n)) pathRecordMineStage = (PathRecordMineStage)n;
+    if (dict.TryGetValue("pathRecordMeters", out s) && double.TryParse(s, out d)) pathRecordMeters = d;
+    if (dict.TryGetValue("pathRecordMineDepth", out s) && double.TryParse(s, out d)) pathRecordMineDepth = d;
+    if (dict.TryGetValue("cockpitGyroForcedOff", out s)) cockpitGyroControlForcedOff = s == "1";
+    if (dict.TryGetValue("dockingState", out s) && int.TryParse(s, out n)) dockingState = (DockingState)n;
+    if (dict.TryGetValue("dockSyncMode", out s)) dockSyncMode = s == "1";
+    if (dict.TryGetValue("undockRecompileTicksRemaining", out s) && int.TryParse(s, out n)) undockRecompileTicksRemaining = n;
+    if (dict.TryGetValue("dockMergeReadyTicks", out s) && int.TryParse(s, out n)) dockMergeReadyTicks = n;
+    if (dict.TryGetValue("dockConnectRetryTicks", out s) && int.TryParse(s, out n)) dockConnectRetryTicks = n;
+    if (dict.TryGetValue("dockConnectRecompileTicksRemaining", out s) && int.TryParse(s, out n)) dockConnectRecompileTicksRemaining = n;
+    if (dict.TryGetValue("dockConnectRecompileArmed", out s)) dockConnectRecompileArmed = s == "1";
+    if (dict.TryGetValue("connectorOffsetLocal", out s) && TryParseV3(s, out v)) connectorOffsetLocal = v;
 
     // If drills were actively running when the reload happened, turn them back on
     // and reset the stuck monitor so the stuck timer starts fresh.
