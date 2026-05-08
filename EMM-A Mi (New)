@@ -1081,6 +1081,7 @@ bool TryGetOrInitPathTimerAnchor(out Vector3D anchorPos, out Vector3D anchorForw
     anchorForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
     anchorUp = Vector3D.Normalize(rc.WorldMatrix.Up);
     timer.CustomData = FormatCarrierAnchorLine(anchorPos, anchorForward, anchorUp) + "\n";
+    TriggerPathPointFlash();
     return true;
 }
 
