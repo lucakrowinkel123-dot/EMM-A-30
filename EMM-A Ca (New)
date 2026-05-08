@@ -24,6 +24,8 @@
 // Fullauto     : auto-select nearest Open asteroid with enabled ore(s) and run Mine loop
 // Fullautostop : stop Fullauto loop (does not forcibly cancel an in-progress Mine step)
 // setallopen   : set all asteroid status lines in Zone DB to "Open" (adds missing lines).
+// dbcheck      : cross-validate Zone DB vs Asteroid DB; lists orphaned entries in each.
+// dbcheck;fix  : same as dbcheck, then removes Zone DB entries with no Asteroid DB path data.
 // LoadAsteroid <n> : load the path records from the saved Asteroid record <n> (e.g. 002)
 //                    into the miner's "EMM-A Mi Path" timer, replacing its current content.
 //
@@ -146,6 +148,7 @@ class ZoneAsteroidRecord
 {
     public int Number;
     public Vector3D Position;
+    public string GpsLine = "";   // raw serialized anchor line for round-trip writes
     public List<string> Ores = new List<string>();
     public string Status = "";
 }
@@ -555,6 +558,12 @@ void RemoteCommand(string command)
         case "setallopen":
             SetAllAsteroidsOpen();
             break;
+        case "dbcheck":
+            RunDbCheck(false);
+            break;
+        case "dbcheck;fix":
+            RunDbCheck(true);
+            break;
         case "fullauto":
             fullAutoEnabled = true;
             fullAutoWaitingForMine = false;
@@ -888,6 +897,7 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
 
         Vector3D pos = Vector3D.Zero, f = Vector3D.Zero, u = Vector3D.Zero;
         string status = "";
+        string gpsLine = "";
         var ores = new List<string>();
         bool hasGps = false;
 
@@ -913,6 +923,7 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
             else if (!hasGps && TryParseCarrierAnchorLine(t, out pos, out f, out u))
             {
                 hasGps = true;
+                gpsLine = t;
             }
         }
 
@@ -922,6 +933,7 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
         var rec = new ZoneAsteroidRecord();
         rec.Number = asteroidNum;
         rec.Position = pos;
+        rec.GpsLine = gpsLine;
         rec.Status = status;
         rec.Ores = ores;
         records.Add(rec);
@@ -1338,10 +1350,10 @@ void SimulateRecompile()
     Echo("SaveAsteroid: recompile done.");
 }
 
-// Scans all Asteroid DB timers to find the highest saved asteroid number, then returns +1.
-int FindNextAsteroidNumber()
+// Returns all asteroid numbers stored in Asteroid DB timers.
+HashSet<int> CollectAsteroidDbNumbers()
 {
-    int maxNum = 0;
+    var nums = new HashSet<int>();
     foreach (var t in GetBlocks<IMyTimerBlock>())
     {
         if (t == null || string.IsNullOrWhiteSpace(t.CustomName)) continue;
@@ -1351,11 +1363,85 @@ int FindNextAsteroidNumber()
             string trimmed = line.Trim();
             if (!trimmed.StartsWith("Asteroid ", StringComparison.OrdinalIgnoreCase)) continue;
             int num;
-            if (int.TryParse(trimmed.Substring(9).Trim(), out num) && num > maxNum)
-                maxNum = num;
+            if (int.TryParse(trimmed.Substring(9).Trim(), out num) && num > 0)
+                nums.Add(num);
         }
     }
-    return maxNum + 1;
+    return nums;
+}
+
+// Returns all asteroid numbers stored in the Zone DB.
+HashSet<int> CollectZoneDbNumbers()
+{
+    IMyTimerBlock zoneDb = FindZoneDbTimer();
+    if (zoneDb == null) return new HashSet<int>();
+    var nums = new HashSet<int>();
+    foreach (var rec in ParseZoneDbRecords(zoneDb.CustomData ?? ""))
+        nums.Add(rec.Number);
+    return nums;
+}
+
+// Finds the lowest unused asteroid number across both the Asteroid DB and Zone DB,
+// so that manually deleted entries are reused before allocating new slots.
+int FindNextAsteroidNumber()
+{
+    var used = CollectAsteroidDbNumbers();
+    foreach (int n in CollectZoneDbNumbers()) used.Add(n);
+    int next = 1;
+    while (used.Contains(next)) next++;
+    return next;
+}
+
+// dbcheck   : report orphaned entries in either DB.
+// dbcheck;fix : also remove orphaned Zone DB entries (entries with no Asteroid DB path data).
+void RunDbCheck(bool fix)
+{
+    var asteroidNums = CollectAsteroidDbNumbers();
+    var zoneNums     = CollectZoneDbNumbers();
+
+    var orphanedZone     = new List<int>(); // Zone entry but no path data
+    var orphanedAsteroid = new List<int>(); // path data but no Zone entry
+    foreach (int n in zoneNums)     if (!asteroidNums.Contains(n)) orphanedZone.Add(n);
+    foreach (int n in asteroidNums) if (!zoneNums.Contains(n))     orphanedAsteroid.Add(n);
+    orphanedZone.Sort();
+    orphanedAsteroid.Sort();
+
+    int healthy = zoneNums.Count - orphanedZone.Count;
+    Echo($"DB check: {healthy} healthy, {orphanedZone.Count} orphaned Zone, {orphanedAsteroid.Count} orphaned Asteroid.");
+    if (orphanedZone.Count > 0)
+        Echo("Orphaned Zone (no path data): " + string.Join(", ", orphanedZone.ConvertAll(n => n.ToString("D3"))));
+    if (orphanedAsteroid.Count > 0)
+        Echo("Orphaned Asteroid (no Zone entry): " + string.Join(", ", orphanedAsteroid.ConvertAll(n => n.ToString("D3"))));
+
+    if (!fix || orphanedZone.Count == 0) return;
+
+    // Rebuild Zone DB, omitting orphaned entries.
+    IMyTimerBlock zoneDb = FindZoneDbTimer();
+    if (zoneDb == null) { Echo("dbcheck;fix: Zone DB timer not found."); return; }
+    var orphanSet = new HashSet<int>(orphanedZone);
+    var kept = new List<ZoneAsteroidRecord>();
+    foreach (var rec in ParseZoneDbRecords(zoneDb.CustomData ?? ""))
+        if (!orphanSet.Contains(rec.Number)) kept.Add(rec);
+
+    var sb = new StringBuilder();
+    string lastDbTimer = null;
+    foreach (var rec in kept)
+    {
+        int dbIndex = (rec.Number - 1) / asteroidsPerDb + 1;
+        string dbTimerName = asteroidDbTagPfx + dbIndex.ToString("D2");
+        if (dbTimerName != lastDbTimer)
+        {
+            if (sb.Length > 0) sb.AppendLine();
+            sb.AppendLine(dbTimerName);
+            lastDbTimer = dbTimerName;
+        }
+        sb.AppendLine(rec.Number.ToString("D3"));
+        sb.AppendLine(rec.GpsLine);
+        sb.AppendLine("Ores: " + (rec.Ores.Count > 0 ? string.Join(",", rec.Ores) : "(none)"));
+        sb.AppendLine("Status: " + (string.IsNullOrWhiteSpace(rec.Status) ? "Open" : rec.Status));
+    }
+    zoneDb.CustomData = sb.ToString();
+    Echo($"dbcheck;fix: removed {orphanedZone.Count} orphaned Zone entr{(orphanedZone.Count == 1 ? "y" : "ies")}.");
 }
 
 // Finds a timer block whose name contains the given tag (case-insensitive).
