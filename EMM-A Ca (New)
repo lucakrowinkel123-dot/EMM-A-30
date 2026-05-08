@@ -32,7 +32,7 @@
 // Persistent on-disk format (path timer / Asteroid DB / Zone DB):
 //   carrier anchor : cx,cy,cz:ax,ay,az,a     -- absolute pos + axis-angle rotation
 //   path point     : dx,dy,dz:ax,ay,az,a     -- delta from anchor + axis-angle
-//   mine area      : dx,dy,dz:w,h:depth      -- corner-A delta, w/h in anchor plane, depth
+//   mine area      : dx,dy,dz:ax,ay,az,a:w,h:depth -- corner-A delta, area axis-angle, w/h, depth
 // Player-pasted "GPS:Name:X:Y:Z:|..." waypoints are still accepted by the Nav;... command
 // and as path-timer entries.
 // GoTo <n>         : approach saved Asteroid <n> from a safe side-point, then fly/align to saved
@@ -2300,7 +2300,7 @@ bool TryParseVector3(string csv, out Vector3D value)
 // On-disk record shapes (path timer / Asteroid DB / Zone DB):
 //   anchor (header line 1): cx,cy,cz:ax,ay,az,a   -- absolute carrier pos + axis-angle
 //   path point             : dx,dy,dz:ax,ay,az,a   -- delta from anchor + axis-angle
-//   mine area              : dx,dy,dz:w,h:depth    -- corner A delta, w/h in anchor plane, depth
+//   mine area              : dx,dy,dz:ax,ay,az,a:w,h:depth -- corner A delta, area axis-angle, w/h, depth
 
 string FormatPosCsv(Vector3D p)
 {

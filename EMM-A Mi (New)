@@ -13,7 +13,7 @@
 // Path timer storage (CustomData of pathTimerTag) uses a compact anchor-relative format:
 //   line 1 (header): cx,cy,cz:ax,ay,az,a    -- absolute carrier-anchor pos + axis-angle rotation
 //   path point     : dx,dy,dz:ax,ay,az,a    -- delta from anchor + own axis-angle rotation
-//   mine area      : dx,dy,dz:w,h:depth     -- corner-A delta, w/h offsets in anchor's plane, depth
+//   mine area      : dx,dy,dz:ax,ay,az,a:w,h:depth -- corner-A delta, area axis-angle, w/h in area plane, depth
 // The header is seeded from the dock-pose broadcast on the first write; mine areas reuse the
 // anchor's rotation. SE-style "GPS:Name:X:Y:Z:|..." lines remain accepted for player-pasted input.
 // nexthole : back out of current hole if needed, then skip to the next generated area lane anchor
@@ -899,7 +899,7 @@ void HandlePathRecordMineStep()
         Echo($"Mine area record ready but path timer/anchor missing.");
         return;
     }
-    string rec = FormatMineAreaLine(pathRecordMineCornerA, cornerB, anchorPos, anchorForward, anchorUp, pathRecordMineDepth);
+    string rec = FormatMineAreaLine(pathRecordMineCornerA, cornerB, anchorPos, pathRecordMineForward, pathRecordMineUp, pathRecordMineDepth);
     if (!AppendPathRecordLine(rec))
     {
         Echo($"Mine area record ready but timer tag '{pathTimerTag}' not found.");
@@ -1802,7 +1802,7 @@ bool ExecutePathRecord(string rawRecord)
     {
         Vector3D cornerA, cornerB, areaUp, areaForward;
         double depth;
-        if (!TryParseMineAreaLine(record, pathAnchorPos, pathAnchorForward, pathAnchorUp,
+        if (!TryParseMineAreaLine(record, pathAnchorPos,
                                   out cornerA, out cornerB, out areaUp, out areaForward, out depth))
             return false;
         StartAreaMiningWithCorners(cornerA, cornerB, areaUp, areaForward, depth);
@@ -2095,7 +2095,7 @@ bool TryParseVector3(string csv, out Vector3D value)
 // On-disk record shapes (path timer / Asteroid DB / Zone DB):
 //   anchor (header line 1): cx,cy,cz:ax,ay,az,a   -- absolute carrier pos + axis-angle
 //   path point             : dx,dy,dz:ax,ay,az,a   -- delta from anchor + axis-angle
-//   mine area              : dx,dy,dz:w,h:depth    -- corner A delta, w/h in anchor plane, depth
+//   mine area              : dx,dy,dz:ax,ay,az,a:w,h:depth -- corner A delta, area axis-angle, w/h, depth
 // Disambiguation: header by file position; mine area by 3 ':'-segments, path point by 2.
 
 string FormatPosCsv(Vector3D p)
@@ -2177,43 +2177,52 @@ bool TryParsePathPointLine(string line, Vector3D anchor, out Vector3D pos, out V
     return true;
 }
 
-string FormatMineAreaLine(Vector3D cornerA, Vector3D cornerB, Vector3D anchor, Vector3D anchorForward, Vector3D anchorUp, double depth)
+// Mine area line format: dx,dy,dz : ax,ay,az,angle : w,h : depth
+//   dx,dy,dz       — corner A as delta from the path-timer anchor position
+//   ax,ay,az,angle — axis-angle rotation captured when the area was recorded (step 1 of pathrecordmine)
+//   w,h            — corner B offset, projected into the recorded rotation's right/up plane
+//   depth          — drill depth along the recorded rotation's forward
+string FormatMineAreaLine(Vector3D cornerA, Vector3D cornerB, Vector3D anchor,
+                          Vector3D forward, Vector3D up, double depth)
 {
-    Vector3D right = Vector3D.Cross(anchorForward, anchorUp);
+    Vector3D fwdN = (forward.LengthSquared() > 1e-9) ? Vector3D.Normalize(forward) : forward;
+    Vector3D upN  = (up.LengthSquared() > 1e-9) ? Vector3D.Normalize(up) : up;
+    Vector3D right = Vector3D.Cross(fwdN, upN);
     if (right.LengthSquared() > 1e-9) right = Vector3D.Normalize(right);
-    Vector3D upN = (anchorUp.LengthSquared() > 1e-9) ? Vector3D.Normalize(anchorUp) : anchorUp;
     Vector3D delta = cornerB - cornerA;
     double w = Vector3D.Dot(delta, right);
     double h = Vector3D.Dot(delta, upN);
     return FormatPosCsv(cornerA - anchor) + ":" +
+           FormatAxisAngle(fwdN, upN) + ":" +
            w.ToString("0.00") + "," + h.ToString("0.00") + ":" +
            depth.ToString("0.##");
 }
 
-bool TryParseMineAreaLine(string line, Vector3D anchor, Vector3D anchorForward, Vector3D anchorUp,
+bool TryParseMineAreaLine(string line, Vector3D anchor,
                           out Vector3D cornerA, out Vector3D cornerB,
                           out Vector3D areaUp, out Vector3D areaForward, out double depth)
 {
     cornerA = Vector3D.Zero;
     cornerB = Vector3D.Zero;
-    areaUp = anchorUp;
-    areaForward = anchorForward;
+    areaUp = new Vector3D(0, 1, 0);
+    areaForward = new Vector3D(0, 0, -1);
     depth = 0;
     if (string.IsNullOrWhiteSpace(line)) return false;
     string[] parts = line.Split(':');
-    if (parts.Length != 3) return false;
+    if (parts.Length != 4) return false;
     Vector3D aDelta;
     if (!TryParseVector3(parts[0], out aDelta)) return false;
-    string[] wh = parts[1].Split(',');
+    if (!TryParseAxisAngle(parts[1], out areaForward, out areaUp)) return false;
+    string[] wh = parts[2].Split(',');
     if (wh.Length != 2) return false;
     double w, h;
     if (!double.TryParse(wh[0].Trim(), out w) || !double.TryParse(wh[1].Trim(), out h)) return false;
-    if (!double.TryParse(parts[2].Trim(), out depth)) return false;
+    if (!double.TryParse(parts[3].Trim(), out depth)) return false;
     cornerA = anchor + aDelta;
-    Vector3D right = Vector3D.Cross(anchorForward, anchorUp);
+    areaForward = Vector3D.Normalize(areaForward);
+    areaUp = Vector3D.Normalize(areaUp);
+    Vector3D right = Vector3D.Cross(areaForward, areaUp);
     if (right.LengthSquared() > 1e-9) right = Vector3D.Normalize(right);
-    areaUp = (anchorUp.LengthSquared() > 1e-9) ? Vector3D.Normalize(anchorUp) : anchorUp;
-    areaForward = (anchorForward.LengthSquared() > 1e-9) ? Vector3D.Normalize(anchorForward) : anchorForward;
     cornerB = cornerA + right * w + areaUp * h;
     return true;
 }
@@ -2221,7 +2230,7 @@ bool TryParseMineAreaLine(string line, Vector3D anchor, Vector3D anchorForward, 
 bool LineLooksLikeMineArea(string line)
 {
     if (string.IsNullOrWhiteSpace(line)) return false;
-    return line.Split(':').Length == 3;
+    return line.Split(':').Length == 4;
 }
 
 bool TryParsePoint(string text, out Vector3D value)
