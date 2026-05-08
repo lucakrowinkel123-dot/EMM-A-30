@@ -866,16 +866,10 @@ void HandlePathRecordMineStep()
 
     if (pathRecordMineStage == PathRecordMineStage.Idle)
     {
-        if (!HasFreshCarrierPose())
-        {
-            Echo("Mine record denied: no fresh carrier connector pose broadcast.");
-            return;
-        }
         SavePathGpsRecord();
         pathRecordMineEntry = rc.GetPosition();
         // Live recording (soft-lock, return-to-entry, auto-mine) uses the miner's own
-        // orientation. The on-disk record projects corners into the anchor's plane at
-        // serialization time, so the stored area still lives in the dock-pose frame.
+        // orientation. The on-disk record projects corners into the anchor's coordinate frame.
         pathRecordMineUp = Vector3D.Normalize(rc.WorldMatrix.Up);
         pathRecordMineForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
         pathRecordingPaused = true;
@@ -1049,8 +1043,8 @@ void UpdateIndicatorLight()
     indicatorLight.Color = indicatorNeutralColor;
 }
 
-// Returns the anchor for the path timer. If the timer is empty, a fresh header is written
-// using the current carrier broadcast pose (requires a fresh dock-pose broadcast).
+// Returns the anchor for the path timer. If the timer is empty, seeds a header using the
+// miner's current RC position and orientation as the anchor reference point.
 bool TryGetOrInitPathTimerAnchor(out Vector3D anchorPos, out Vector3D anchorForward, out Vector3D anchorUp)
 {
     anchorPos = Vector3D.Zero;
@@ -1075,15 +1069,15 @@ bool TryGetOrInitPathTimerAnchor(out Vector3D anchorPos, out Vector3D anchorForw
     if (hasAny)
         return false; // existing content but no anchor line — don't overwrite with a fresh seed
 
-    // Empty timer: seed with a fresh anchor from the carrier broadcast.
-    if (!HasFreshCarrierPose())
+    // Empty timer: seed with the miner's current RC position and orientation as anchor.
+    if (rc == null)
     {
-        Echo("Path record: no fresh carrier pose to anchor on.");
+        Echo("Path record: no remote control to anchor on.");
         return false;
     }
-    anchorPos = GetCarrierConnectorPosition();
-    anchorForward = Vector3D.Normalize(carrierConnectorForward);
-    anchorUp = Vector3D.Normalize(carrierConnectorUp);
+    anchorPos = rc.GetPosition();
+    anchorForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
+    anchorUp = Vector3D.Normalize(rc.WorldMatrix.Up);
     timer.CustomData = FormatCarrierAnchorLine(anchorPos, anchorForward, anchorUp) + "\n";
     return true;
 }
