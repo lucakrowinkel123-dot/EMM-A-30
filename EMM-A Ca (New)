@@ -1203,7 +1203,7 @@ void SaveAsteroid()
     foreach (string line in pathLines)
         sb.AppendLine(line);
 
-    // Append record to the Asteroid DB timer
+    // Insert record into the Asteroid DB timer in ascending number order.
     IMyTimerBlock dbTimer = FindTimerByTag(dbTimerName);
     if (dbTimer == null)
     {
@@ -1211,9 +1211,39 @@ void SaveAsteroid()
         return;
     }
     string existingDb = dbTimer.CustomData ?? "";
-    if (!string.IsNullOrWhiteSpace(existingDb) && !existingDb.EndsWith("\n"))
-        existingDb += "\n";
-    dbTimer.CustomData = existingDb + sb.ToString();
+    string newRecord  = sb.ToString(); // starts with asteroidHeaderLine
+    bool inserted = false;
+    int searchFrom = 0;
+    while (true)
+    {
+        int sepIdx = existingDb.IndexOf(asteroidHeaderLine, searchFrom, StringComparison.Ordinal);
+        if (sepIdx < 0) break;
+        // Skip newlines after the separator to reach the first content line
+        int pos = sepIdx + asteroidHeaderLine.Length;
+        while (pos < existingDb.Length && (existingDb[pos] == '\n' || existingDb[pos] == '\r'))
+            pos++;
+        int lineEnd = existingDb.IndexOfAny(new char[] { '\n', '\r' }, pos);
+        if (lineEnd < 0) lineEnd = existingDb.Length;
+        string firstLine = existingDb.Substring(pos, lineEnd - pos).Trim();
+        if (firstLine.StartsWith("Asteroid ", StringComparison.OrdinalIgnoreCase))
+        {
+            int existingNum;
+            if (int.TryParse(firstLine.Substring(9).Trim(), out existingNum) && existingNum > asteroidNum)
+            {
+                string before = existingDb.Substring(0, sepIdx);
+                if (before.Length > 0 && !before.EndsWith("\n")) before += "\n";
+                dbTimer.CustomData = before + newRecord + existingDb.Substring(sepIdx);
+                inserted = true;
+                break;
+            }
+        }
+        searchFrom = sepIdx + 1;
+    }
+    if (!inserted)
+    {
+        if (existingDb.Length > 0 && !existingDb.EndsWith("\n")) existingDb += "\n";
+        dbTimer.CustomData = existingDb + newRecord;
+    }
 
     // Update the Zone DB (GPS + ore summary + mined status)
     UpdateZoneDb(asteroidNum, dbTimerName, carrierGps, oreMap);
