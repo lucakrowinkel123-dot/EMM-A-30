@@ -754,7 +754,9 @@ void StartPathRecording(string command)
     pathRecordingWaitReturn = false;
     pathRecordMineStage = PathRecordMineStage.Idle;
     pathRecordLastPos = rc.GetPosition();
-    SavePathGpsRecord();
+    // Seed the anchor header now so it exists before any path points are appended.
+    Vector3D _ap, _af, _au;
+    TryGetOrInitPathTimerAnchor(out _ap, out _af, out _au);
     Echo($"Path recording started ({pathRecordMeters:0.0} m interval).");
 }
 
